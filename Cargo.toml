@@ -1,0 +1,17 @@
+[package]
+name = "dummy-pkcs11"
+version = "0.1.0"
+edition = "2024"
+description = "A minimal, do-nothing PKCS#11 module written in Rust"
+
+[lib]
+# Build a C-compatible shared library: target/release/libdummy_pkcs11.so
+crate-type = ["cdylib"]
+
+[dependencies]
+# Raw PKCS#11 type/constant definitions generated from the OASIS headers.
+cryptoki-sys = "0.5.0"
+
+[profile.release]
+# A panic must never unwind into the calling C application.
+panic = "abort"
