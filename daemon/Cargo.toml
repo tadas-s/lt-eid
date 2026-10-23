@@ -9,6 +9,5 @@ name = "lt-eidd"
 path = "src/main.rs"
 
 [dependencies]
-cryptoki = "0.12"
 cryptoki-sys.workspace = true
 lt-eid-proto.workspace = true

@@ -15,14 +15,20 @@ connection to the card, so PACE runs once and clients never fight over it.
 
 - `proto/`: requests, responses and framing (little-endian `u32` length + postcard).
 - `pkcs11/`: the proxy module, a `cdylib` built as `liblt_eid_pkcs11.so`.
-- `daemon/`: `lt-eidd`, using the `cryptoki` crate to drive OpenSC.
+- `daemon/`: `lt-eidd`. Drives OpenSC through raw `C_*` calls (`cryptoki-sys`),
+  so attribute bytes and `CK_RV` codes pass through unchanged.
 
 ## Status
 
-- Slot and token info come from the card via the daemon.
-- Sessions, login and object search are still local stand-ins (any PIN is
-  accepted, searches find nothing). Crypto returns `CKR_FUNCTION_NOT_SUPPORTED`.
-- With the daemon down, the module still loads and shows an empty slot.
+- Slot and token info, object search and `C_GetAttributeValue` come from the
+  card via the daemon. `pkcs11-tool -O` lists the card's objects.
+- Sessions are local to the module. The daemon keeps one shared read-only
+  session per OpenSC slot and runs each search start to finish under its lock.
+- Login is still a local stand-in (any PIN is accepted). Crypto returns
+  `CKR_FUNCTION_NOT_SUPPORTED`.
+- With the daemon down, the module still loads and shows an empty slot;
+  operations on open sessions return `CKR_DEVICE_REMOVED`. Clients reconnect
+  on their own once the daemon is back.
 
 ## Build and try
 
@@ -34,6 +40,15 @@ connection to the card, so PACE runs once and clients never fight over it.
     pkcs11-tool --module $M -L     # slot / token from the card
 
 `LT_EID_SOCKET` overrides the socket path for both sides.
+
+### Without a card
+
+Any PKCS#11 module can stand in for OpenSC, e.g. SoftHSM:
+
+    export SOFTHSM2_CONF=/path/to/softhsm2.conf LT_EID_SOCKET=/tmp/lt-eid-test.sock
+    softhsm2-util --init-token --free --label "Test eID" --pin 123456 --so-pin 12345678
+    target/release/lt-eidd /usr/lib64/pkcs11/libsofthsm2.so &
+    pkcs11-tool --module $M -O
 
 To register the module with p11-kit, so that NSS, GnuTLS and others find it,
 create `~/.config/pkcs11/modules/lt-eid.module` containing:

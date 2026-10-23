@@ -3,10 +3,10 @@
 //! It never talks to the card itself. It forwards to the lt-eid daemon over
 //! a unix socket, and the daemon owns the one connection to the card.
 //!
-//! So far only slot and token information come from the daemon. Sessions,
-//! login and object search are still local stand-ins (any PIN is accepted,
-//! searches find nothing); every cryptographic operation returns
-//! `CKR_FUNCTION_NOT_SUPPORTED`.
+//! Slot and token information, object search and attribute reads come from
+//! the daemon. Sessions are local: each one remembers which daemon token it
+//! belongs to. Login is still a local stand-in (any PIN is accepted), and
+//! every cryptographic operation returns `CKR_FUNCTION_NOT_SUPPORTED`.
 //!
 //! Applications load the shared library, call `C_GetFunctionList` and from
 //! then on go through the returned table of function pointers.
@@ -19,7 +19,9 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, MutexGuard};
 
 use cryptoki_sys::*;
-use lt_eid_proto::{PROTO_VERSION, Request, Response, Token, read_frame, write_frame};
+use lt_eid_proto::{
+    Attr, AttrValue, PROTO_VERSION, Request, Response, Token, read_frame, write_frame,
+};
 
 const SLOT_ID: CK_SLOT_ID = 0;
 const PKCS11_VERSION: CK_VERSION = CK_VERSION { major: 2, minor: 40 };
@@ -30,7 +32,10 @@ const PKCS11_VERSION: CK_VERSION = CK_VERSION { major: 2, minor: 40 };
 
 struct Session {
     flags: CK_FLAGS,
-    find_active: bool,
+    /// The daemon's slot for our token, fixed when the session opens.
+    slot: u64,
+    /// Results of the active search and how many were handed out.
+    find: Option<(Vec<CK_OBJECT_HANDLE>, usize)>,
 }
 
 struct State {
@@ -97,6 +102,16 @@ fn call(state: &mut State, req: &Request) -> Option<Response> {
         state.conn = None;
     }
     resp.ok()
+}
+
+/// Like `call`, for operations that need the daemon: an unreachable daemon
+/// or an error reply becomes a `CK_RV`.
+fn request(state: &mut State, req: &Request) -> Result<Response, CK_RV> {
+    match call(state, req) {
+        None => Err(CKR_DEVICE_REMOVED),
+        Some(Response::Rv(rv)) => Err(rv),
+        Some(resp) => Ok(resp),
+    }
 }
 
 /// The token behind our slot, if the daemon is up and a card is inserted.
@@ -332,16 +347,9 @@ pub unsafe extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_TOKEN
             .values()
             .filter(|s| s.flags & CKF_RW_SESSION != 0)
             .count();
-        let mut flags = CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED;
-        for (set, flag) in [
-            (token.pin_count_low, CKF_USER_PIN_COUNT_LOW),
-            (token.pin_final_try, CKF_USER_PIN_FINAL_TRY),
-            (token.pin_locked, CKF_USER_PIN_LOCKED),
-        ] {
-            if set {
-                flags |= flag;
-            }
-        }
+        // Only the PIN status comes from the card; the rest describes us.
+        let pin_status = CKF_USER_PIN_COUNT_LOW | CKF_USER_PIN_FINAL_TRY | CKF_USER_PIN_LOCKED;
+        let flags = CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED | (token.flags & pin_status);
         let info = CK_TOKEN_INFO {
             label: padded(&token.label),
             manufacturerID: padded(&token.manufacturer),
@@ -423,12 +431,12 @@ pub unsafe extern "C" fn C_OpenSession(
         if flags & CKF_SERIAL_SESSION == 0 {
             return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
         }
-        if token(state).is_none() {
+        let Some(token) = token(state) else {
             return CKR_TOKEN_NOT_PRESENT;
-        }
+        };
         let handle = state.next_handle;
         state.next_handle += 1;
-        state.sessions.insert(handle, Session { flags, find_active: false });
+        state.sessions.insert(handle, Session { flags, slot: token.slot, find: None });
         unsafe { *phSession = handle };
         CKR_OK
     })
@@ -527,8 +535,29 @@ pub unsafe extern "C" fn C_Logout(hSession: CK_SESSION_HANDLE) -> CK_RV {
 }
 
 // ---------------------------------------------------------------------------
-// Object search -- the token is empty, so every search finds nothing.
+// Objects
+//
+// The daemon returns all matches at once; we hand them out page by page.
 // ---------------------------------------------------------------------------
+
+/// The C template as owned attributes, for sending to the daemon.
+unsafe fn read_template(pTemplate: *const CK_ATTRIBUTE, ulCount: CK_ULONG) -> Result<Vec<Attr>, CK_RV> {
+    if ulCount == 0 {
+        return Ok(Vec::new());
+    }
+    let template = unsafe { std::slice::from_raw_parts(pTemplate, ulCount as usize) };
+    template
+        .iter()
+        .map(|a| {
+            let value = match (a.pValue.is_null(), a.ulValueLen) {
+                (_, 0) => Vec::new(),
+                (true, _) => return Err(CKR_ATTRIBUTE_VALUE_INVALID),
+                (false, len) => unsafe { std::slice::from_raw_parts(a.pValue as *const u8, len as usize) }.to_vec(),
+            };
+            Ok(Attr { ty: a.type_, value })
+        })
+        .collect()
+}
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_FindObjectsInit(
@@ -539,11 +568,25 @@ pub unsafe extern "C" fn C_FindObjectsInit(
     if pTemplate.is_null() && ulCount > 0 {
         return CKR_ARGUMENTS_BAD;
     }
-    with_session(hSession, |session| {
-        if session.find_active {
-            return CKR_OPERATION_ACTIVE;
+    let template = match unsafe { read_template(pTemplate, ulCount) } {
+        Ok(template) => template,
+        Err(rv) => return rv,
+    };
+    with_state(|state| {
+        let slot = match state.sessions.get(&hSession) {
+            None => return CKR_SESSION_HANDLE_INVALID,
+            Some(session) if session.find.is_some() => return CKR_OPERATION_ACTIVE,
+            Some(session) => session.slot,
+        };
+        let found = match request(state, &Request::Find { slot, template }) {
+            Ok(Response::Objects(found)) => found,
+            Ok(_) => return CKR_DEVICE_ERROR,
+            Err(rv) => return rv,
+        };
+        // The session can't vanish meanwhile: we hold the state lock.
+        if let Some(session) = state.sessions.get_mut(&hSession) {
+            session.find = Some((found, 0));
         }
-        session.find_active = true;
         CKR_OK
     })
 }
@@ -552,17 +595,23 @@ pub unsafe extern "C" fn C_FindObjectsInit(
 pub unsafe extern "C" fn C_FindObjects(
     hSession: CK_SESSION_HANDLE,
     phObject: *mut CK_OBJECT_HANDLE,
-    _ulMaxObjectCount: CK_ULONG,
+    ulMaxObjectCount: CK_ULONG,
     pulObjectCount: *mut CK_ULONG,
 ) -> CK_RV {
     if phObject.is_null() || pulObjectCount.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
     with_session(hSession, |session| {
-        if !session.find_active {
+        let Some((found, next)) = session.find.as_mut() else {
             return CKR_OPERATION_NOT_INITIALIZED;
+        };
+        let page = &found[*next..];
+        let page = &page[..page.len().min(ulMaxObjectCount as usize)];
+        unsafe {
+            std::ptr::copy_nonoverlapping(page.as_ptr(), phObject, page.len());
+            *pulObjectCount = page.len() as CK_ULONG;
         }
-        unsafe { *pulObjectCount = 0 };
+        *next += page.len();
         CKR_OK
     })
 }
@@ -570,11 +619,62 @@ pub unsafe extern "C" fn C_FindObjects(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_FindObjectsFinal(hSession: CK_SESSION_HANDLE) -> CK_RV {
     with_session(hSession, |session| {
-        if !session.find_active {
+        if session.find.take().is_none() {
             return CKR_OPERATION_NOT_INITIALIZED;
         }
-        session.find_active = false;
         CKR_OK
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn C_GetAttributeValue(
+    hSession: CK_SESSION_HANDLE,
+    hObject: CK_OBJECT_HANDLE,
+    pTemplate: *mut CK_ATTRIBUTE,
+    ulCount: CK_ULONG,
+) -> CK_RV {
+    if pTemplate.is_null() && ulCount > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let template: &mut [CK_ATTRIBUTE] = if ulCount == 0 {
+        &mut []
+    } else {
+        unsafe { std::slice::from_raw_parts_mut(pTemplate, ulCount as usize) }
+    };
+    with_state(|state| {
+        let Some(slot) = state.sessions.get(&hSession).map(|s| s.slot) else {
+            return CKR_SESSION_HANDLE_INVALID;
+        };
+        let types = template.iter().map(|a| a.type_).collect();
+        let values = match request(state, &Request::GetAttrs { slot, object: hObject, types }) {
+            Ok(Response::Attrs(values)) if values.len() == template.len() => values,
+            Ok(_) => return CKR_DEVICE_ERROR,
+            Err(rv) => return rv,
+        };
+
+        // Every attribute is filled in even after one fails; the spec then
+        // lets us return any of the per-attribute errors.
+        let mut rv = CKR_OK;
+        for (attr, value) in template.iter_mut().zip(values) {
+            let error = match value {
+                AttrValue::Sensitive => CKR_ATTRIBUTE_SENSITIVE,
+                AttrValue::Invalid => CKR_ATTRIBUTE_TYPE_INVALID,
+                // Two-call pattern: a NULL buffer asks for the size.
+                AttrValue::Value(v) if attr.pValue.is_null() => {
+                    attr.ulValueLen = v.len() as CK_ULONG;
+                    continue;
+                }
+                AttrValue::Value(v) if attr.ulValueLen >= v.len() as CK_ULONG => {
+                    unsafe { std::ptr::copy_nonoverlapping(v.as_ptr(), attr.pValue.cast(), v.len()) };
+                    attr.ulValueLen = v.len() as CK_ULONG;
+                    continue;
+                }
+                AttrValue::Value(_) => CKR_BUFFER_TOO_SMALL,
+            };
+            attr.ulValueLen = CK_UNAVAILABLE_INFORMATION;
+            rv = error;
+        }
+        rv
     })
 }
 
@@ -614,7 +714,6 @@ not_supported! {
     fn C_CopyObject(H, OBJ, ATTRS, LEN, POBJ);
     fn C_DestroyObject(H, OBJ);
     fn C_GetObjectSize(H, OBJ, PLEN);
-    fn C_GetAttributeValue(H, OBJ, ATTRS, LEN);
     fn C_SetAttributeValue(H, OBJ, ATTRS, LEN);
 
     fn C_EncryptInit(H, MECH, OBJ);

@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to `Request` or `Response`.
-pub const PROTO_VERSION: u32 = 1;
+pub const PROTO_VERSION: u32 = 2;
 
 /// Upper bound for a single frame. Certificates are the largest payload.
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -23,17 +23,25 @@ pub enum Request {
     Hello { proto: u32 },
     /// List the tokens currently present.
     Tokens,
+    /// Find all objects on the token in `slot` matching `template`.
+    Find { slot: u64, template: Vec<Attr> },
+    /// Read attributes of one object, in the order given.
+    GetAttrs { slot: u64, object: u64, types: Vec<u64> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     Hello { proto: u32 },
     Tokens(Vec<Token>),
+    Objects(Vec<u64>),
+    /// One entry per requested type.
+    Attrs(Vec<AttrValue>),
     /// The request failed with this `CK_RV`.
     Rv(u64),
 }
 
 /// A token as reported by the daemon's OpenSC, one per PIN on the card.
+/// Strings have their blank padding removed.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Token {
     pub slot: u64,
@@ -41,11 +49,27 @@ pub struct Token {
     pub manufacturer: String,
     pub model: String,
     pub serial: String,
+    /// `CK_TOKEN_INFO.flags`, unmodified.
+    pub flags: u64,
     pub min_pin_len: u64,
     pub max_pin_len: u64,
-    pub pin_count_low: bool,
-    pub pin_final_try: bool,
-    pub pin_locked: bool,
+}
+
+/// A `CK_ATTRIBUTE` with its value as raw bytes. Both ends run on the same
+/// machine, so native-endian `CK_ULONG` values need no conversion.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Attr {
+    pub ty: u64,
+    pub value: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum AttrValue {
+    Value(Vec<u8>),
+    /// `CKR_ATTRIBUTE_SENSITIVE`
+    Sensitive,
+    /// `CKR_ATTRIBUTE_TYPE_INVALID`
+    Invalid,
 }
 
 /// `$LT_EID_SOCKET`, or `$XDG_RUNTIME_DIR/lt-eid/sock`.
