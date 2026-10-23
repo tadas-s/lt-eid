@@ -12,26 +12,34 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to `Request` or `Response`.
-pub const PROTO_VERSION: u32 = 2;
+pub const PROTO_VERSION: u32 = 3;
 
 /// Upper bound for a single frame. Certificates are the largest payload.
 pub const MAX_FRAME: usize = 64 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Request {
-    /// Must be the first request on a connection.
-    Hello { proto: u32 },
+    /// Must be the first request on a connection. `app` names the client
+    /// in the daemon's dialogs.
+    Hello { proto: u32, app: String },
     /// List the tokens currently present.
     Tokens,
     /// Find all objects on the token in `slot` matching `template`.
     Find { slot: u64, template: Vec<Attr> },
     /// Read attributes of one object, in the order given.
     GetAttrs { slot: u64, object: u64, types: Vec<u64> },
+    /// Log this client in to the token in `slot`. The daemon asks the user
+    /// for the PIN, or only for approval if the token is already logged in.
+    /// Blocks until the user answers.
+    Login { slot: u64 },
+    /// Log this client out. The card itself stays logged in for others.
+    Logout { slot: u64 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
     Hello { proto: u32 },
+    Ok,
     Tokens(Vec<Token>),
     Objects(Vec<u64>),
     /// One entry per requested type.
@@ -49,10 +57,20 @@ pub struct Token {
     pub manufacturer: String,
     pub model: String,
     pub serial: String,
+    pub role: Role,
     /// `CK_TOKEN_INFO.flags`, unmodified.
     pub flags: u64,
     pub min_pin_len: u64,
     pub max_pin_len: u64,
+}
+
+/// What a token is for. OpenSC shows one token per PIN on the card.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Role {
+    /// The PACE PIN token: authentication key, used for TLS client login.
+    Auth,
+    /// The PIN.QES token: qualified signature key.
+    Qes,
 }
 
 /// A `CK_ATTRIBUTE` with its value as raw bytes. Both ends run on the same
@@ -112,11 +130,11 @@ mod tests {
     #[test]
     fn round_trip() {
         let mut buf = Vec::new();
-        write_frame(&mut buf, &Request::Hello { proto: PROTO_VERSION }).unwrap();
+        write_frame(&mut buf, &Request::Hello { proto: PROTO_VERSION, app: "test".into() }).unwrap();
         write_frame(&mut buf, &Request::Tokens).unwrap();
 
         let mut r = buf.as_slice();
-        assert!(matches!(read_frame(&mut r).unwrap(), Request::Hello { proto: PROTO_VERSION }));
+        assert!(matches!(read_frame(&mut r).unwrap(), Request::Hello { proto: PROTO_VERSION, .. }));
         assert!(matches!(read_frame(&mut r).unwrap(), Request::Tokens));
         assert!(r.is_empty());
     }

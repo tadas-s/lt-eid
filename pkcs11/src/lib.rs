@@ -3,27 +3,36 @@
 //! It never talks to the card itself. It forwards to the lt-eid daemon over
 //! a unix socket, and the daemon owns the one connection to the card.
 //!
-//! Slot and token information, object search and attribute reads come from
-//! the daemon. Sessions are local: each one remembers which daemon token it
-//! belongs to. Login is still a local stand-in (any PIN is accepted), and
-//! every cryptographic operation returns `CKR_FUNCTION_NOT_SUPPORTED`.
+//! There are two fixed slots: 0 for the authentication token and 1 for the
+//! qualified signature token. Slot and token information, object search,
+//! attribute reads and login go to the daemon. Sessions are local: each one
+//! remembers which daemon token it belongs to. Every cryptographic operation
+//! still returns `CKR_FUNCTION_NOT_SUPPORTED`.
+//!
+//! Tokens advertise a protected authentication path: applications call
+//! `C_Login` without a PIN, and the daemon asks the user for it.
 //!
 //! Applications load the shared library, call `C_GetFunctionList` and from
 //! then on go through the returned table of function pointers.
 
 #![allow(non_snake_case)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, MutexGuard};
 
 use cryptoki_sys::*;
 use lt_eid_proto::{
-    Attr, AttrValue, PROTO_VERSION, Request, Response, Token, read_frame, write_frame,
+    Attr, AttrValue, PROTO_VERSION, Request, Response, Role, Token, read_frame, write_frame,
 };
 
-const SLOT_ID: CK_SLOT_ID = 0;
+/// Our fixed slots. The token behind each comes and goes with the card.
+const SLOTS: [(CK_SLOT_ID, Role); 2] = [(0, Role::Auth), (1, Role::Qes)];
+
+fn slot_role(slot: CK_SLOT_ID) -> Option<Role> {
+    SLOTS.iter().find(|(id, _)| *id == slot).map(|(_, role)| *role)
+}
 const PKCS11_VERSION: CK_VERSION = CK_VERSION { major: 2, minor: 40 };
 
 // ---------------------------------------------------------------------------
@@ -32,8 +41,10 @@ const PKCS11_VERSION: CK_VERSION = CK_VERSION { major: 2, minor: 40 };
 
 struct Session {
     flags: CK_FLAGS,
-    /// The daemon's slot for our token, fixed when the session opens.
-    slot: u64,
+    /// Our slot.
+    slot: CK_SLOT_ID,
+    /// The daemon's slot for the token, fixed when the session opens.
+    token_slot: u64,
     /// Results of the active search and how many were handed out.
     find: Option<(Vec<CK_OBJECT_HANDLE>, usize)>,
 }
@@ -41,7 +52,8 @@ struct Session {
 struct State {
     sessions: HashMap<CK_SESSION_HANDLE, Session>,
     next_handle: CK_SESSION_HANDLE,
-    logged_in: bool,
+    /// Our slots this application is logged in to.
+    logged_in: HashSet<CK_SLOT_ID>,
     /// Connection to the daemon, opened on first use.
     conn: Option<UnixStream>,
     /// Process that owns `conn`. A forked child must not share it.
@@ -72,11 +84,19 @@ fn with_session(h: CK_SESSION_HANDLE, f: impl FnOnce(&mut Session) -> CK_RV) -> 
     })
 }
 
+/// How the daemon's dialogs refer to us: the program's file name.
+fn app_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "An application".to_owned())
+}
+
 fn connect() -> std::io::Result<UnixStream> {
     let path = lt_eid_proto::socket_path()
         .ok_or_else(|| std::io::Error::other("no socket path"))?;
     let mut conn = UnixStream::connect(path)?;
-    write_frame(&mut conn, &Request::Hello { proto: PROTO_VERSION })?;
+    write_frame(&mut conn, &Request::Hello { proto: PROTO_VERSION, app: app_name() })?;
     match read_frame(&mut conn)? {
         Response::Hello { proto: PROTO_VERSION } => Ok(conn),
         _ => Err(std::io::Error::other("daemon speaks another protocol")),
@@ -114,12 +134,31 @@ fn request(state: &mut State, req: &Request) -> Result<Response, CK_RV> {
     }
 }
 
-/// The token behind our slot, if the daemon is up and a card is inserted.
-fn token(state: &mut State) -> Option<Token> {
-    match call(state, &Request::Tokens)? {
-        // OpenSC shows one token per PIN; the first is the authentication one.
-        Response::Tokens(tokens) => tokens.into_iter().next(),
-        _ => None,
+/// The tokens behind our slots, as `(our slot, token)`. Empty if the daemon
+/// is down or no card is inserted.
+fn tokens(state: &mut State) -> Vec<(CK_SLOT_ID, Token)> {
+    let Some(Response::Tokens(tokens)) = call(state, &Request::Tokens) else {
+        return Vec::new();
+    };
+    SLOTS
+        .iter()
+        .filter_map(|&(slot, role)| {
+            let token = tokens.iter().find(|t| t.role == role)?;
+            Some((slot, token.clone()))
+        })
+        .collect()
+}
+
+/// The token behind one of our slots.
+fn token(state: &mut State, slot: CK_SLOT_ID) -> Option<Token> {
+    tokens(state).into_iter().find(|(s, _)| *s == slot).map(|(_, token)| token)
+}
+
+/// Forget this application's login to `slot`, here and in the daemon.
+fn log_out(state: &mut State, slot: CK_SLOT_ID, token_slot: u64) {
+    if state.logged_in.remove(&slot) {
+        // If the daemon is gone, so is its record of our login.
+        let _ = call(state, &Request::Logout { slot: token_slot });
     }
 }
 
@@ -239,7 +278,7 @@ pub unsafe extern "C" fn C_Initialize(pInitArgs: *mut c_void) -> CK_RV {
     *guard = Some(State {
         sessions: HashMap::new(),
         next_handle: 1,
-        logged_in: false,
+        logged_in: HashSet::new(),
         conn: None,
         pid: std::process::id(),
     });
@@ -289,8 +328,13 @@ pub unsafe extern "C" fn C_GetSlotList(
         return CKR_ARGUMENTS_BAD;
     }
     with_state(|state| unsafe {
-        // The slot always exists; only its token comes and goes.
-        let count = if tokenPresent == CK_FALSE || token(state).is_some() { 1 } else { 0 };
+        // The slots always exist; only their tokens come and go.
+        let slots: Vec<CK_SLOT_ID> = if tokenPresent == CK_FALSE {
+            SLOTS.iter().map(|(slot, _)| *slot).collect()
+        } else {
+            tokens(state).into_iter().map(|(slot, _)| slot).collect()
+        };
+        let count = slots.len() as CK_ULONG;
         // Standard PKCS#11 two-call pattern: a NULL list asks for the size.
         if pSlotList.is_null() {
             *pulCount = count;
@@ -300,9 +344,7 @@ pub unsafe extern "C" fn C_GetSlotList(
             *pulCount = count;
             return CKR_BUFFER_TOO_SMALL;
         }
-        if count == 1 {
-            *pSlotList = SLOT_ID;
-        }
+        std::ptr::copy_nonoverlapping(slots.as_ptr(), pSlotList, slots.len());
         *pulCount = count;
         CKR_OK
     })
@@ -314,12 +356,16 @@ pub unsafe extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_SLOT_I
         return CKR_ARGUMENTS_BAD;
     }
     with_state(|state| {
-        if slotID != SLOT_ID {
+        let Some(role) = slot_role(slotID) else {
             return CKR_SLOT_ID_INVALID;
-        }
-        let present = if token(state).is_some() { CKF_TOKEN_PRESENT } else { 0 };
+        };
+        let present = if token(state, slotID).is_some() { CKF_TOKEN_PRESENT } else { 0 };
+        let description = match role {
+            Role::Auth => "Lithuanian eID: authentication",
+            Role::Qes => "Lithuanian eID: qualified signature",
+        };
         let info = CK_SLOT_INFO {
-            slotDescription: padded("Lithuanian eID"),
+            slotDescription: padded(description),
             manufacturerID: padded("lt-eid"),
             flags: CKF_REMOVABLE_DEVICE | CKF_HW_SLOT | present,
             hardwareVersion: CK_VERSION { major: 0, minor: 1 },
@@ -336,20 +382,23 @@ pub unsafe extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_TOKEN
         return CKR_ARGUMENTS_BAD;
     }
     with_state(|state| {
-        if slotID != SLOT_ID {
+        if slot_role(slotID).is_none() {
             return CKR_SLOT_ID_INVALID;
         }
-        let Some(token) = token(state) else {
+        let Some(token) = token(state, slotID) else {
             return CKR_TOKEN_NOT_PRESENT;
         };
-        let rw_count = state
-            .sessions
-            .values()
-            .filter(|s| s.flags & CKF_RW_SESSION != 0)
-            .count();
+        let sessions: Vec<&Session> = state.sessions.values().filter(|s| s.slot == slotID).collect();
+        let rw_count = sessions.iter().filter(|s| s.flags & CKF_RW_SESSION != 0).count();
         // Only the PIN status comes from the card; the rest describes us.
+        // The daemon asks for the PIN, hence the protected authentication path.
         let pin_status = CKF_USER_PIN_COUNT_LOW | CKF_USER_PIN_FINAL_TRY | CKF_USER_PIN_LOCKED;
-        let flags = CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED | (token.flags & pin_status);
+        let flags = CKF_TOKEN_INITIALIZED
+            | CKF_USER_PIN_INITIALIZED
+            | CKF_LOGIN_REQUIRED
+            | CKF_PROTECTED_AUTHENTICATION_PATH
+            | CKF_WRITE_PROTECTED
+            | (token.flags & pin_status);
         let info = CK_TOKEN_INFO {
             label: padded(&token.label),
             manufacturerID: padded(&token.manufacturer),
@@ -357,7 +406,7 @@ pub unsafe extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_TOKEN
             serialNumber: padded(&token.serial),
             flags,
             ulMaxSessionCount: CK_EFFECTIVELY_INFINITE,
-            ulSessionCount: state.sessions.len() as CK_ULONG,
+            ulSessionCount: sessions.len() as CK_ULONG,
             ulMaxRwSessionCount: CK_EFFECTIVELY_INFINITE,
             ulRwSessionCount: rw_count as CK_ULONG,
             ulMaxPinLen: token.max_pin_len as CK_ULONG,
@@ -385,7 +434,7 @@ pub unsafe extern "C" fn C_GetMechanismList(
         return CKR_ARGUMENTS_BAD;
     }
     with_state(|_| {
-        if slotID != SLOT_ID {
+        if slot_role(slotID).is_none() {
             return CKR_SLOT_ID_INVALID;
         }
         // We support no mechanisms at all.
@@ -401,7 +450,7 @@ pub unsafe extern "C" fn C_GetMechanismInfo(
     _pInfo: *mut CK_MECHANISM_INFO,
 ) -> CK_RV {
     with_state(|_| {
-        if slotID != SLOT_ID {
+        if slot_role(slotID).is_none() {
             return CKR_SLOT_ID_INVALID;
         }
         CKR_MECHANISM_INVALID
@@ -424,19 +473,20 @@ pub unsafe extern "C" fn C_OpenSession(
         return CKR_ARGUMENTS_BAD;
     }
     with_state(|state| {
-        if slotID != SLOT_ID {
+        if slot_role(slotID).is_none() {
             return CKR_SLOT_ID_INVALID;
         }
         // Required by the spec for legacy reasons.
         if flags & CKF_SERIAL_SESSION == 0 {
             return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
         }
-        let Some(token) = token(state) else {
+        let Some(token) = token(state, slotID) else {
             return CKR_TOKEN_NOT_PRESENT;
         };
         let handle = state.next_handle;
         state.next_handle += 1;
-        state.sessions.insert(handle, Session { flags, slot: token.slot, find: None });
+        let session = Session { flags, slot: slotID, token_slot: token.slot, find: None };
+        state.sessions.insert(handle, session);
         unsafe { *phSession = handle };
         CKR_OK
     })
@@ -445,12 +495,12 @@ pub unsafe extern "C" fn C_OpenSession(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_CloseSession(hSession: CK_SESSION_HANDLE) -> CK_RV {
     with_state(|state| {
-        if state.sessions.remove(&hSession).is_none() {
+        let Some(closed) = state.sessions.remove(&hSession) else {
             return CKR_SESSION_HANDLE_INVALID;
-        }
-        // Login state is per-token and ends with its last session.
-        if state.sessions.is_empty() {
-            state.logged_in = false;
+        };
+        // Login state is per token and ends with its last session.
+        if !state.sessions.values().any(|s| s.slot == closed.slot) {
+            log_out(state, closed.slot, closed.token_slot);
         }
         CKR_OK
     })
@@ -459,11 +509,20 @@ pub unsafe extern "C" fn C_CloseSession(hSession: CK_SESSION_HANDLE) -> CK_RV {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_CloseAllSessions(slotID: CK_SLOT_ID) -> CK_RV {
     with_state(|state| {
-        if slotID != SLOT_ID {
+        if slot_role(slotID).is_none() {
             return CKR_SLOT_ID_INVALID;
         }
-        state.sessions.clear();
-        state.logged_in = false;
+        let mut token_slot = None;
+        state.sessions.retain(|_, s| {
+            if s.slot != slotID {
+                return true;
+            }
+            token_slot = Some(s.token_slot);
+            false
+        });
+        if let Some(token_slot) = token_slot {
+            log_out(state, slotID, token_slot);
+        }
         CKR_OK
     })
 }
@@ -482,8 +541,8 @@ pub unsafe extern "C" fn C_GetSessionInfo(
         };
         let rw = session.flags & CKF_RW_SESSION != 0;
         let info = CK_SESSION_INFO {
-            slotID: SLOT_ID,
-            state: match (rw, state.logged_in) {
+            slotID: session.slot,
+            state: match (rw, state.logged_in.contains(&session.slot)) {
                 (false, false) => CKS_RO_PUBLIC_SESSION,
                 (false, true) => CKS_RO_USER_FUNCTIONS,
                 (true, false) => CKS_RW_PUBLIC_SESSION,
@@ -505,17 +564,29 @@ pub unsafe extern "C" fn C_Login(
     _ulPinLen: CK_ULONG,
 ) -> CK_RV {
     with_state(|state| {
-        if !state.sessions.contains_key(&hSession) {
+        let Some(session) = state.sessions.get(&hSession) else {
             return CKR_SESSION_HANDLE_INVALID;
+        };
+        let (slot, token_slot) = (session.slot, session.token_slot);
+        match userType {
+            CKU_USER => {}
+            // Re-authentication for a single signature; there is no
+            // signing yet, so no operation for it to belong to.
+            CKU_CONTEXT_SPECIFIC => return CKR_OPERATION_NOT_INITIALIZED,
+            _ => return CKR_USER_TYPE_INVALID,
         }
-        if userType != CKU_USER {
-            return CKR_USER_TYPE_INVALID;
-        }
-        if state.logged_in {
+        if state.logged_in.contains(&slot) {
             return CKR_USER_ALREADY_LOGGED_IN;
         }
-        // Any PIN is accepted.
-        state.logged_in = true;
+        // A PIN passed in anyway is ignored: PINs go to the card only
+        // through the daemon's own dialog. This blocks until the user
+        // answers it.
+        match request(state, &Request::Login { slot: token_slot }) {
+            Ok(Response::Ok) => {}
+            Ok(_) => return CKR_DEVICE_ERROR,
+            Err(rv) => return rv,
+        }
+        state.logged_in.insert(slot);
         CKR_OK
     })
 }
@@ -523,13 +594,14 @@ pub unsafe extern "C" fn C_Login(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_Logout(hSession: CK_SESSION_HANDLE) -> CK_RV {
     with_state(|state| {
-        if !state.sessions.contains_key(&hSession) {
+        let Some(session) = state.sessions.get(&hSession) else {
             return CKR_SESSION_HANDLE_INVALID;
-        }
-        if !state.logged_in {
+        };
+        let (slot, token_slot) = (session.slot, session.token_slot);
+        if !state.logged_in.contains(&slot) {
             return CKR_USER_NOT_LOGGED_IN;
         }
-        state.logged_in = false;
+        log_out(state, slot, token_slot);
         CKR_OK
     })
 }
@@ -576,7 +648,7 @@ pub unsafe extern "C" fn C_FindObjectsInit(
         let slot = match state.sessions.get(&hSession) {
             None => return CKR_SESSION_HANDLE_INVALID,
             Some(session) if session.find.is_some() => return CKR_OPERATION_ACTIVE,
-            Some(session) => session.slot,
+            Some(session) => session.token_slot,
         };
         let found = match request(state, &Request::Find { slot, template }) {
             Ok(Response::Objects(found)) => found,
@@ -642,7 +714,7 @@ pub unsafe extern "C" fn C_GetAttributeValue(
         unsafe { std::slice::from_raw_parts_mut(pTemplate, ulCount as usize) }
     };
     with_state(|state| {
-        let Some(slot) = state.sessions.get(&hSession).map(|s| s.slot) else {
+        let Some(slot) = state.sessions.get(&hSession).map(|s| s.token_slot) else {
             return CKR_SESSION_HANDLE_INVALID;
         };
         let types = template.iter().map(|a| a.type_).collect();

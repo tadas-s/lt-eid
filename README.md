@@ -15,20 +15,46 @@ connection to the card, so PACE runs once and clients never fight over it.
 
 - `proto/`: requests, responses and framing (little-endian `u32` length + postcard).
 - `pkcs11/`: the proxy module, a `cdylib` built as `liblt_eid_pkcs11.so`.
-- `daemon/`: `lt-eidd`. Drives OpenSC through raw `C_*` calls (`cryptoki-sys`),
-  so attribute bytes and `CK_RV` codes pass through unchanged.
+- `daemon/`: `lt-eidd`.
+  - `card.rs` drives OpenSC through raw `C_*` calls (`cryptoki-sys`), so
+    attribute bytes and `CK_RV` codes pass through unchanged.
+  - `dialog.rs` shows PIN and approval dialogs through pinentry.
+  - `main.rs` serves clients and decides who may use which token.
 
 ## Status
 
-- Slot and token info, object search and `C_GetAttributeValue` come from the
-  card via the daemon. `pkcs11-tool -O` lists the card's objects.
+- Two fixed slots: 0 is the authentication token ("PACE-PIN"), 1 the
+  qualified signature token ("PIN.QES"). The daemon tells them apart by the
+  OpenSC token label.
+- Slot and token info, object search, `C_GetAttributeValue` and login go to
+  the daemon. Crypto still returns `CKR_FUNCTION_NOT_SUPPORTED`.
 - Sessions are local to the module. The daemon keeps one shared read-only
   session per OpenSC slot and runs each search start to finish under its lock.
-- Login is still a local stand-in (any PIN is accepted). Crypto returns
-  `CKR_FUNCTION_NOT_SUPPORTED`.
-- With the daemon down, the module still loads and shows an empty slot;
+- With the daemon down, the module still loads and shows empty slots;
   operations on open sessions return `CKR_DEVICE_REMOVED`. Clients reconnect
   on their own once the daemon is back.
+
+## Login
+
+Tokens advertise `CKF_PROTECTED_AUTHENTICATION_PATH`, so applications call
+`C_Login` without a PIN (a PIN passed anyway is ignored). The daemon then:
+
+- asks for the PIN if the token is logged out. It retries on a wrong PIN,
+  showing the card's retry warnings, and rejects a PIN of the wrong length
+  before it reaches the card. Cancel returns `CKR_FUNCTION_CANCELED`.
+- asks only for approval (Allow / Deny) if another application already
+  logged the token in.
+
+Approvals belong to the application's connection and to that particular
+card login: `C_Logout`, closing the last session, exiting, or the card
+being reset all end it. The daemon never logs the card out (the lteid
+driver's logout tears down PACE, logging out both tokens).
+
+Until an application is logged in to a token, searches only return its
+public objects, even if the card itself is logged in.
+
+Dialogs use `pinentry` from `$PATH`, or `$LT_EID_PINENTRY`. Start `lt-eidd`
+from inside the desktop session so pinentry can open a window.
 
 ## Build and try
 
@@ -37,7 +63,8 @@ connection to the card, so PACE runs once and clients never fight over it.
 
     M=target/release/liblt_eid_pkcs11.so
     pkcs11-tool --module $M -I     # library info
-    pkcs11-tool --module $M -L     # slot / token from the card
+    pkcs11-tool --module $M -L     # slots / tokens from the card
+    pkcs11-tool --module $M --slot 0 --login -O    # PIN dialog, then private objects too
 
 `LT_EID_SOCKET` overrides the socket path for both sides.
 
