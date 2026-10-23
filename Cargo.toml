@@ -1,16 +1,17 @@
-[package]
-name = "dummy-pkcs11"
+[workspace]
+resolver = "3"
+members = ["proto", "pkcs11", "daemon"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
-description = "A minimal, do-nothing PKCS#11 module written in Rust"
 
-[lib]
-# Build a C-compatible shared library: target/release/libdummy_pkcs11.so
-crate-type = ["cdylib"]
-
-[dependencies]
+[workspace.dependencies]
+lt-eid-proto = { path = "proto" }
 # Raw PKCS#11 type/constant definitions generated from the OASIS headers.
 cryptoki-sys = "0.5.0"
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1.1", default-features = false, features = ["use-std"] }
 
 [profile.release]
 # A panic must never unwind into the calling C application.

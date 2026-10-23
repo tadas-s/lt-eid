@@ -1,0 +1,13 @@
+[package]
+name = "lt-eid-pkcs11"
+description = "PKCS#11 module that forwards to the lt-eid daemon"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+# Build a C-compatible shared library: target/release/liblt_eid_pkcs11.so
+crate-type = ["cdylib"]
+
+[dependencies]
+cryptoki-sys.workspace = true
+lt-eid-proto.workspace = true

@@ -1,8 +1,12 @@
-//! A dummy PKCS#11 module.
+//! The lt-eid PKCS#11 module.
 //!
-//! It exposes a single slot holding an empty, initialized token. Sessions,
-//! login and object search work (searches simply find nothing); every
-//! cryptographic operation returns `CKR_FUNCTION_NOT_SUPPORTED`.
+//! It never talks to the card itself. It forwards to the lt-eid daemon over
+//! a unix socket, and the daemon owns the one connection to the card.
+//!
+//! So far only slot and token information come from the daemon. Sessions,
+//! login and object search are still local stand-ins (any PIN is accepted,
+//! searches find nothing); every cryptographic operation returns
+//! `CKR_FUNCTION_NOT_SUPPORTED`.
 //!
 //! Applications load the shared library, call `C_GetFunctionList` and from
 //! then on go through the returned table of function pointers.
@@ -11,9 +15,11 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
+use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, MutexGuard};
 
 use cryptoki_sys::*;
+use lt_eid_proto::{PROTO_VERSION, Request, Response, Token, read_frame, write_frame};
 
 const SLOT_ID: CK_SLOT_ID = 0;
 const PKCS11_VERSION: CK_VERSION = CK_VERSION { major: 2, minor: 40 };
@@ -31,6 +37,10 @@ struct State {
     sessions: HashMap<CK_SESSION_HANDLE, Session>,
     next_handle: CK_SESSION_HANDLE,
     logged_in: bool,
+    /// Connection to the daemon, opened on first use.
+    conn: Option<UnixStream>,
+    /// Process that owns `conn`. A forked child must not share it.
+    pid: u32,
 }
 
 /// `None` until `C_Initialize` is called, and again after `C_Finalize`.
@@ -55,6 +65,47 @@ fn with_session(h: CK_SESSION_HANDLE, f: impl FnOnce(&mut Session) -> CK_RV) -> 
         Some(session) => f(session),
         None => CKR_SESSION_HANDLE_INVALID,
     })
+}
+
+fn connect() -> std::io::Result<UnixStream> {
+    let path = lt_eid_proto::socket_path()
+        .ok_or_else(|| std::io::Error::other("no socket path"))?;
+    let mut conn = UnixStream::connect(path)?;
+    write_frame(&mut conn, &Request::Hello { proto: PROTO_VERSION })?;
+    match read_frame(&mut conn)? {
+        Response::Hello { proto: PROTO_VERSION } => Ok(conn),
+        _ => Err(std::io::Error::other("daemon speaks another protocol")),
+    }
+}
+
+/// Send one request to the daemon, connecting first if needed.
+///
+/// `None` means the daemon is unreachable. Callers report that as "no
+/// token" rather than an error, so applications keep the module loaded.
+fn call(state: &mut State, req: &Request) -> Option<Response> {
+    let pid = std::process::id();
+    if state.pid != pid {
+        state.conn = None;
+        state.pid = pid;
+    }
+    if state.conn.is_none() {
+        state.conn = connect().ok();
+    }
+    let conn = state.conn.as_mut()?;
+    let resp = write_frame(conn, req).and_then(|()| read_frame(conn));
+    if resp.is_err() {
+        state.conn = None;
+    }
+    resp.ok()
+}
+
+/// The token behind our slot, if the daemon is up and a card is inserted.
+fn token(state: &mut State) -> Option<Token> {
+    match call(state, &Request::Tokens)? {
+        // OpenSC shows one token per PIN; the first is the authentication one.
+        Response::Tokens(tokens) => tokens.into_iter().next(),
+        _ => None,
+    }
 }
 
 /// PKCS#11 strings are fixed-size, blank-padded and not NUL-terminated.
@@ -174,6 +225,8 @@ pub unsafe extern "C" fn C_Initialize(pInitArgs: *mut c_void) -> CK_RV {
         sessions: HashMap::new(),
         next_handle: 1,
         logged_in: false,
+        conn: None,
+        pid: std::process::id(),
     });
     CKR_OK
 }
@@ -197,9 +250,9 @@ pub unsafe extern "C" fn C_GetInfo(pInfo: *mut CK_INFO) -> CK_RV {
     with_state(|_| {
         let info = CK_INFO {
             cryptokiVersion: PKCS11_VERSION,
-            manufacturerID: padded("Dummy"),
+            manufacturerID: padded("lt-eid"),
             flags: 0,
-            libraryDescription: padded("Dummy PKCS#11 module (Rust)"),
+            libraryDescription: padded("Lithuanian eID (via lt-eidd)"),
             libraryVersion: CK_VERSION { major: 0, minor: 1 },
         };
         unsafe { *pInfo = info };
@@ -213,25 +266,29 @@ pub unsafe extern "C" fn C_GetInfo(pInfo: *mut CK_INFO) -> CK_RV {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetSlotList(
-    _tokenPresent: CK_BBOOL,
+    tokenPresent: CK_BBOOL,
     pSlotList: *mut CK_SLOT_ID,
     pulCount: *mut CK_ULONG,
 ) -> CK_RV {
     if pulCount.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    with_state(|_| unsafe {
+    with_state(|state| unsafe {
+        // The slot always exists; only its token comes and goes.
+        let count = if tokenPresent == CK_FALSE || token(state).is_some() { 1 } else { 0 };
         // Standard PKCS#11 two-call pattern: a NULL list asks for the size.
         if pSlotList.is_null() {
-            *pulCount = 1;
+            *pulCount = count;
             return CKR_OK;
         }
-        if *pulCount < 1 {
-            *pulCount = 1;
+        if *pulCount < count {
+            *pulCount = count;
             return CKR_BUFFER_TOO_SMALL;
         }
-        *pSlotList = SLOT_ID;
-        *pulCount = 1;
+        if count == 1 {
+            *pSlotList = SLOT_ID;
+        }
+        *pulCount = count;
         CKR_OK
     })
 }
@@ -241,14 +298,15 @@ pub unsafe extern "C" fn C_GetSlotInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_SLOT_I
     if pInfo.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    with_state(|_| {
+    with_state(|state| {
         if slotID != SLOT_ID {
             return CKR_SLOT_ID_INVALID;
         }
+        let present = if token(state).is_some() { CKF_TOKEN_PRESENT } else { 0 };
         let info = CK_SLOT_INFO {
-            slotDescription: padded("Dummy slot"),
-            manufacturerID: padded("Dummy"),
-            flags: CKF_TOKEN_PRESENT,
+            slotDescription: padded("Lithuanian eID"),
+            manufacturerID: padded("lt-eid"),
+            flags: CKF_REMOVABLE_DEVICE | CKF_HW_SLOT | present,
             hardwareVersion: CK_VERSION { major: 0, minor: 1 },
             firmwareVersion: CK_VERSION { major: 0, minor: 1 },
         };
@@ -266,23 +324,36 @@ pub unsafe extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_TOKEN
         if slotID != SLOT_ID {
             return CKR_SLOT_ID_INVALID;
         }
+        let Some(token) = token(state) else {
+            return CKR_TOKEN_NOT_PRESENT;
+        };
         let rw_count = state
             .sessions
             .values()
             .filter(|s| s.flags & CKF_RW_SESSION != 0)
             .count();
+        let mut flags = CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED;
+        for (set, flag) in [
+            (token.pin_count_low, CKF_USER_PIN_COUNT_LOW),
+            (token.pin_final_try, CKF_USER_PIN_FINAL_TRY),
+            (token.pin_locked, CKF_USER_PIN_LOCKED),
+        ] {
+            if set {
+                flags |= flag;
+            }
+        }
         let info = CK_TOKEN_INFO {
-            label: padded("Dummy token"),
-            manufacturerID: padded("Dummy"),
-            model: padded("Dummy"),
-            serialNumber: padded("0000000000000001"),
-            flags: CKF_TOKEN_INITIALIZED | CKF_USER_PIN_INITIALIZED,
+            label: padded(&token.label),
+            manufacturerID: padded(&token.manufacturer),
+            model: padded(&token.model),
+            serialNumber: padded(&token.serial),
+            flags,
             ulMaxSessionCount: CK_EFFECTIVELY_INFINITE,
             ulSessionCount: state.sessions.len() as CK_ULONG,
             ulMaxRwSessionCount: CK_EFFECTIVELY_INFINITE,
             ulRwSessionCount: rw_count as CK_ULONG,
-            ulMaxPinLen: 64,
-            ulMinPinLen: 0,
+            ulMaxPinLen: token.max_pin_len as CK_ULONG,
+            ulMinPinLen: token.min_pin_len as CK_ULONG,
             ulTotalPublicMemory: CK_UNAVAILABLE_INFORMATION,
             ulFreePublicMemory: CK_UNAVAILABLE_INFORMATION,
             ulTotalPrivateMemory: CK_UNAVAILABLE_INFORMATION,
@@ -351,6 +422,9 @@ pub unsafe extern "C" fn C_OpenSession(
         // Required by the spec for legacy reasons.
         if flags & CKF_SERIAL_SESSION == 0 {
             return CKR_SESSION_PARALLEL_NOT_SUPPORTED;
+        }
+        if token(state).is_none() {
+            return CKR_TOKEN_NOT_PRESENT;
         }
         let handle = state.next_handle;
         state.next_handle += 1;

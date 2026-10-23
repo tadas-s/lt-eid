@@ -1,35 +1,53 @@
-# dummy-pkcs11
+# lt-eid
 
-A minimal PKCS#11 (Cryptoki 2.40) module written in Rust that does nothing useful.
-It shows how a module is put together.
+PKCS#11 access to the Lithuanian eID card through one central daemon.
 
-- One slot (`0`) with an empty, initialized token
-- Sessions, login (any PIN accepted) and object search work. Searches find nothing.
-- No mechanisms. Every crypto or object function returns `CKR_FUNCTION_NOT_SUPPORTED`.
+Applications (browsers, Autogram, `pkcs11-tool`) load a small proxy module.
+The proxy never touches the card; it forwards to `lt-eidd` over a unix socket.
+`lt-eidd` loads a private OpenSC build (`/opt/opensc`) and owns the only
+connection to the card, so PACE runs once and clients never fight over it.
 
-## Build
+    Firefox ─┐
+    Chrome  ─┼─ liblt_eid_pkcs11.so ── $XDG_RUNTIME_DIR/lt-eid/sock ──▶ lt-eidd ──▶ opensc-pkcs11.so ──▶ card
+    Autogram ┘
+
+## Crates
+
+- `proto/`: requests, responses and framing (little-endian `u32` length + postcard).
+- `pkcs11/`: the proxy module, a `cdylib` built as `liblt_eid_pkcs11.so`.
+- `daemon/`: `lt-eidd`, using the `cryptoki` crate to drive OpenSC.
+
+## Status
+
+- Slot and token info come from the card via the daemon.
+- Sessions, login and object search are still local stand-ins (any PIN is
+  accepted, searches find nothing). Crypto returns `CKR_FUNCTION_NOT_SUPPORTED`.
+- With the daemon down, the module still loads and shows an empty slot.
+
+## Build and try
 
     cargo build --release
-    # -> target/release/libdummy_pkcs11.so
+    target/release/lt-eidd [path/to/opensc-pkcs11.so]   # default /opt/opensc/lib/opensc-pkcs11.so
 
-## Try it
+    M=target/release/liblt_eid_pkcs11.so
+    pkcs11-tool --module $M -I     # library info
+    pkcs11-tool --module $M -L     # slot / token from the card
 
-    M=target/release/libdummy_pkcs11.so
-    pkcs11-tool --module $M -I               # library info
-    pkcs11-tool --module $M -L               # slots / token
-    pkcs11-tool --module $M --login --pin 1234 -O
+`LT_EID_SOCKET` overrides the socket path for both sides.
 
-To register it with p11-kit, so that NSS, GnuTLS and others can find it, create
-`~/.config/pkcs11/modules/dummy.module` containing:
+To register the module with p11-kit, so that NSS, GnuTLS and others find it,
+create `~/.config/pkcs11/modules/lt-eid.module` containing:
 
-    module: /home/robot/src/dummy-pkcs11/target/release/libdummy_pkcs11.so
+    module: /home/robot/src/lt-eid/target/release/liblt_eid_pkcs11.so
 
-## How it works
+## How the module works
 
 - `crate-type = ["cdylib"]` builds a plain C shared library.
 - `cryptoki-sys` provides the C structs, constants and function-pointer types.
 - `C_GetFunctionList` returns a pointer to a static `CK_FUNCTION_LIST`.
   Applications call everything else through that table.
 - Global state is a `Mutex<Option<State>>`. `None` means "not initialized".
+  The daemon connection lives in it, opened on first use and reopened after
+  `fork()`; only one request per process is in flight.
 - `panic = "abort"` is set in the release profile, so a Rust panic never unwinds
   into the C caller.

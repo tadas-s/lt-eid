@@ -1,0 +1,14 @@
+[package]
+name = "lt-eid-daemon"
+description = "Owns the Lithuanian eID card connection and serves lt-eid PKCS#11 clients"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "lt-eidd"
+path = "src/main.rs"
+
+[dependencies]
+cryptoki = "0.12"
+cryptoki-sys.workspace = true
+lt-eid-proto.workspace = true
