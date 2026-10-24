@@ -1,0 +1,9 @@
+[Unit]
+Description=Lithuanian eID daemon
+# Started by its socket on the first PKCS#11 client.
+Requires=lt-eidd.socket
+After=lt-eidd.socket
+
+[Service]
+ExecStart=/usr/bin/lt-eidd
+Restart=on-failure

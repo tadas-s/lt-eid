@@ -17,6 +17,7 @@ mod dialog;
 use std::collections::HashMap;
 use std::fs;
 use std::io;
+use std::os::fd::FromRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -195,12 +196,39 @@ fn serve(daemon: &Daemon, mut stream: UnixStream) -> io::Result<()> {
     }
 }
 
+/// The listening socket systemd passed us (socket activation), if any.
+///
+/// Must run before any thread starts: it edits the environment.
+fn activated_listener() -> Option<UnixListener> {
+    let pid = std::env::var("LISTEN_PID").ok();
+    let fds = std::env::var("LISTEN_FDS").ok();
+    // Meant for us only: pinentry must not see them.
+    for name in ["LISTEN_PID", "LISTEN_PIDFDID", "LISTEN_FDS", "LISTEN_FDNAMES"] {
+        unsafe { std::env::remove_var(name) };
+    }
+    if pid?.parse::<u32>().ok()? != std::process::id() {
+        return None;
+    }
+    if fds?.parse::<u32>().ok()? != 1 {
+        eprintln!("expected one socket from systemd");
+        return None;
+    }
+    // The first passed descriptor is 3 (SD_LISTEN_FDS_START). It comes
+    // without close-on-exec; a clone has it, so pinentry won't inherit it.
+    let passed = unsafe { UnixListener::from_raw_fd(3) };
+    passed.try_clone().ok()
+}
+
 /// Bind the socket in a private directory, replacing a stale socket file.
 fn bind(path: &Path) -> io::Result<UnixListener> {
     if let Some(dir) = path.parent() {
         fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
     }
     match fs::symlink_metadata(path) {
+        // Someone still answers there: another lt-eidd, or systemd's socket.
+        Ok(meta) if meta.file_type().is_socket() && UnixStream::connect(path).is_ok() => {
+            return Err(io::Error::new(io::ErrorKind::AddrInUse, "in use by another lt-eidd or its systemd socket"));
+        }
         Ok(meta) if meta.file_type().is_socket() => fs::remove_file(path)?,
         Ok(_) => {
             return Err(io::Error::new(
@@ -214,15 +242,11 @@ fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 fn main() {
+    let activated = activated_listener();
     let module: PathBuf = std::env::args_os()
         .nth(1)
         .map(Into::into)
         .unwrap_or_else(|| DEFAULT_MODULE.into());
-    let Some(socket) = lt_eid_proto::socket_path() else {
-        eprintln!("neither LT_EID_SOCKET nor XDG_RUNTIME_DIR is set");
-        std::process::exit(1);
-    };
-
     let card = match Card::open(&module) {
         Ok(card) => card,
         Err(e) => {
@@ -235,14 +259,27 @@ fn main() {
         dialog: Mutex::new(()),
         dialogs: Dialogs::new(),
     });
-    let listener = match bind(&socket) {
-        Ok(listener) => listener,
-        Err(e) => {
-            eprintln!("binding {}: {e}", socket.display());
-            std::process::exit(1);
+    let listener = match activated {
+        Some(listener) => {
+            eprintln!("using {}, listening on the socket from systemd", module.display());
+            listener
+        }
+        None => {
+            let Some(socket) = lt_eid_proto::socket_path() else {
+                eprintln!("neither LT_EID_SOCKET nor XDG_RUNTIME_DIR is set");
+                std::process::exit(1);
+            };
+            let listener = match bind(&socket) {
+                Ok(listener) => listener,
+                Err(e) => {
+                    eprintln!("binding {}: {e}", socket.display());
+                    std::process::exit(1);
+                }
+            };
+            eprintln!("using {}, listening on {}", module.display(), socket.display());
+            listener
         }
     };
-    eprintln!("using {}, listening on {}", module.display(), socket.display());
 
     for stream in listener.incoming() {
         let stream = match stream {

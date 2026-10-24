@@ -77,6 +77,9 @@ failed signature the daemon replaces its shared session, since PKCS#11 2.40
 can't cancel an operation (it opens the new session first: closing a slot's
 last session would log it out).
 
+Dialogs name the application by its program name (for `java -jar`, the
+jar's name), shown nicer for known ones ("firefox" becomes "Firefox").
+
 Dialogs use `pinentry` from `$PATH`, or `$LT_EID_PINENTRY`. Start `lt-eidd`
 from inside the desktop session so pinentry can open a window.
 
@@ -84,6 +87,7 @@ from inside the desktop session so pinentry can open a window.
 
     cargo build --release
     target/release/lt-eidd [path/to/opensc-pkcs11.so]   # default /opt/opensc/lib/opensc-pkcs11.so
+                                                        # (or let systemd start it, below)
 
     M=target/release/liblt_eid_pkcs11.so
     pkcs11-tool --module $M -I     # library info
@@ -91,6 +95,27 @@ from inside the desktop session so pinentry can open a window.
     pkcs11-tool --module $M --slot 0 --login -O    # PIN dialog, then private objects too
 
 `LT_EID_SOCKET` overrides the socket path for both sides.
+
+### As a systemd user service
+
+`systemd/` has a socket unit and a service: systemd listens on
+`$XDG_RUNTIME_DIR/lt-eid/sock` and starts `lt-eidd` on the first client. The
+service inherits the desktop session's environment, which pinentry needs to
+open its window.
+
+    systemctl --user link $PWD/systemd/lt-eidd.socket $PWD/systemd/lt-eidd.service
+    systemctl --user enable --now lt-eidd.socket
+
+The service runs `/usr/bin/lt-eidd`. To run a development build instead, add
+a drop-in (`systemctl --user edit lt-eidd.service`):
+
+    [Service]
+    ExecStart=
+    ExecStart=/path/to/lt-eid/target/release/lt-eidd
+
+After rebuilding, `systemctl --user restart lt-eidd.service` (this logs the
+card out). Logs: `journalctl --user -u lt-eidd`. Started by hand while the
+socket unit is active, `lt-eidd` refuses to take over its socket.
 
 ### Without a card
 

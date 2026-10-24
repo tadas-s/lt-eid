@@ -100,12 +100,29 @@ fn with_session(h: CK_SESSION_HANDLE, f: impl FnOnce(&mut Session) -> CK_RV) -> 
     })
 }
 
-/// How the daemon's dialogs refer to us: the program's file name.
+/// How the daemon's dialogs refer to us: the program's file name, or for a
+/// `java -jar` application, the jar's.
 fn app_name() -> String {
-    std::env::current_exe()
+    let exe = std::env::current_exe()
         .ok()
-        .and_then(|exe| exe.file_name().map(|name| name.to_string_lossy().into_owned()))
-        .unwrap_or_else(|| "An application".to_owned())
+        .and_then(|exe| exe.file_name().map(|name| name.to_string_lossy().into_owned()));
+    match exe.as_deref() {
+        Some("java") => jar_name(&std::env::args().collect::<Vec<_>>()).unwrap_or_else(|| "A Java application".to_owned()),
+        Some(exe) => exe.to_owned(),
+        None => "An application".to_owned(),
+    }
+}
+
+/// The jar in a `java ... -jar <file>` command line, without directory,
+/// extension or version: "autogram" for "target/autogram-2.6.92.jar".
+fn jar_name(args: &[String]) -> Option<String> {
+    let jar = args.iter().skip_while(|arg| *arg != "-jar").nth(1)?;
+    let stem = std::path::Path::new(jar).file_stem()?.to_str()?;
+    let name = match stem.rsplit_once('-') {
+        Some((name, version)) if version.starts_with(|c: char| c.is_ascii_digit()) => name,
+        _ => stem,
+    };
+    Some(name.to_owned())
 }
 
 fn connect() -> std::io::Result<UnixStream> {
@@ -1102,4 +1119,22 @@ not_supported! {
     fn C_GetFunctionStatus(H);
     fn C_CancelFunction(H);
     fn C_WaitForSlotEvent(CK_FLAGS, *mut CK_SLOT_ID, *mut c_void);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(line: &str) -> Vec<String> {
+        line.split(' ').map(str::to_owned).collect()
+    }
+
+    #[test]
+    fn jar_names() {
+        assert_eq!(jar_name(&args("/usr/bin/java -jar target/autogram-2.6.92.jar --cli")).as_deref(), Some("autogram"));
+        assert_eq!(jar_name(&args("java -Xmx1g -jar /opt/tool.jar")).as_deref(), Some("tool"));
+        assert_eq!(jar_name(&args("java -jar my-tool.jar")).as_deref(), Some("my-tool"));
+        assert_eq!(jar_name(&args("java -cp x.jar Main")), None);
+        assert_eq!(jar_name(&args("java -jar")), None);
+    }
 }

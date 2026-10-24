@@ -1,0 +1,11 @@
+[Unit]
+Description=Lithuanian eID daemon socket
+
+[Socket]
+# Where the lt-eid PKCS#11 module looks: $XDG_RUNTIME_DIR/lt-eid/sock
+ListenStream=%t/lt-eid/sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target
