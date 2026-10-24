@@ -5,9 +5,12 @@
 //!
 //! There are two fixed slots: 0 for the authentication token and 1 for the
 //! qualified signature token. Slot and token information, object search,
-//! attribute reads and login go to the daemon. Sessions are local: each one
-//! remembers which daemon token it belongs to. Every cryptographic operation
-//! still returns `CKR_FUNCTION_NOT_SUPPORTED`.
+//! attribute reads, login and signing go to the daemon. Sessions are local:
+//! each one remembers which daemon token it belongs to.
+//!
+//! Signing offers `CKM_ECDSA` and `CKM_ECDSA_SHA256/384/512`. The hashing is
+//! done here, so the card only ever sees `CKM_ECDSA`. Everything else
+//! returns `CKR_FUNCTION_NOT_SUPPORTED`.
 //!
 //! Tokens advertise a protected authentication path: applications call
 //! `C_Login` without a PIN, and the daemon asks the user for it.
@@ -23,6 +26,7 @@ use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, MutexGuard};
 
 use cryptoki_sys::*;
+use sha2::{Digest, Sha256, Sha384, Sha512};
 use lt_eid_proto::{
     Attr, AttrValue, PROTO_VERSION, Request, Response, Role, Token, read_frame, write_frame,
 };
@@ -47,6 +51,18 @@ struct Session {
     token_slot: u64,
     /// Results of the active search and how many were handed out.
     find: Option<(Vec<CK_OBJECT_HANDLE>, usize)>,
+    sign: Option<SignOp>,
+}
+
+/// An active signing operation. The daemon signs in one go, so the message
+/// is collected here until the application asks for the signature.
+struct SignOp {
+    mechanism: CK_MECHANISM_TYPE,
+    key: CK_OBJECT_HANDLE,
+    message: Vec<u8>,
+    /// Kept after a size query or a too-small buffer, so the next call
+    /// returns the same signature instead of signing again.
+    signature: Option<Vec<u8>>,
 }
 
 struct State {
@@ -113,15 +129,27 @@ fn call(state: &mut State, req: &Request) -> Option<Response> {
         state.conn = None;
         state.pid = pid;
     }
-    if state.conn.is_none() {
-        state.conn = connect().ok();
+    // A connection that worked before may have died with a daemon restart:
+    // then retry once on a fresh one.
+    for _ in 0..2 {
+        let reused = state.conn.is_some();
+        if !reused {
+            state.conn = Some(connect().ok()?);
+            // Logins are held per connection; none carry over to this one.
+            state.logged_in.clear();
+        }
+        let conn = state.conn.as_mut()?;
+        match write_frame(conn, req).and_then(|()| read_frame(conn)) {
+            Ok(resp) => return Some(resp),
+            Err(_) => {
+                state.conn = None;
+                if !reused {
+                    return None;
+                }
+            }
+        }
     }
-    let conn = state.conn.as_mut()?;
-    let resp = write_frame(conn, req).and_then(|()| read_frame(conn));
-    if resp.is_err() {
-        state.conn = None;
-    }
-    resp.ok()
+    None
 }
 
 /// Like `call`, for operations that need the daemon: an unreachable daemon
@@ -424,21 +452,70 @@ pub unsafe extern "C" fn C_GetTokenInfo(slotID: CK_SLOT_ID, pInfo: *mut CK_TOKEN
     })
 }
 
+/// The mechanisms we offer. Only `CKM_ECDSA` reaches the card; for the
+/// others we hash the message first.
+const MECHANISMS: [CK_MECHANISM_TYPE; 4] = [CKM_ECDSA, CKM_ECDSA_SHA256, CKM_ECDSA_SHA384, CKM_ECDSA_SHA512];
+
+/// The card's `CKM_ECDSA` info, limited to signing. `None` if the token
+/// can't sign with it, in which case we offer no mechanisms at all.
+fn ecdsa_info(state: &mut State, slot: CK_SLOT_ID) -> Result<Option<CK_MECHANISM_INFO>, CK_RV> {
+    let token = token(state, slot).ok_or(CKR_TOKEN_NOT_PRESENT)?;
+    let mechanisms = match request(state, &Request::Mechanisms { slot: token.slot })? {
+        Response::Mechanisms(mechanisms) => mechanisms,
+        _ => return Err(CKR_DEVICE_ERROR),
+    };
+    let ec_flags = CKF_EC_F_P | CKF_EC_ECPARAMETERS | CKF_EC_NAMEDCURVE | CKF_EC_CURVENAME | CKF_EC_UNCOMPRESS | CKF_EC_COMPRESS;
+    Ok(mechanisms
+        .iter()
+        .find(|m| m.ty == CKM_ECDSA && m.flags & CKF_SIGN != 0)
+        .map(|m| CK_MECHANISM_INFO {
+            ulMinKeySize: m.min_key_size,
+            ulMaxKeySize: m.max_key_size,
+            flags: m.flags & (CKF_HW | CKF_SIGN | ec_flags),
+        }))
+}
+
+/// What the card signs for `message` under `mechanism`.
+fn to_be_signed(mechanism: CK_MECHANISM_TYPE, message: &[u8]) -> Vec<u8> {
+    match mechanism {
+        CKM_ECDSA_SHA256 => Sha256::digest(message).to_vec(),
+        CKM_ECDSA_SHA384 => Sha384::digest(message).to_vec(),
+        CKM_ECDSA_SHA512 => Sha512::digest(message).to_vec(),
+        // CKM_ECDSA: the application already hashed it.
+        _ => message.to_vec(),
+    }
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetMechanismList(
     slotID: CK_SLOT_ID,
-    _pMechanismList: *mut CK_MECHANISM_TYPE,
+    pMechanismList: *mut CK_MECHANISM_TYPE,
     pulCount: *mut CK_ULONG,
 ) -> CK_RV {
     if pulCount.is_null() {
         return CKR_ARGUMENTS_BAD;
     }
-    with_state(|_| {
+    with_state(|state| unsafe {
         if slot_role(slotID).is_none() {
             return CKR_SLOT_ID_INVALID;
         }
-        // We support no mechanisms at all.
-        unsafe { *pulCount = 0 };
+        let mechanisms: &[CK_MECHANISM_TYPE] = match ecdsa_info(state, slotID) {
+            Ok(Some(_)) => &MECHANISMS,
+            Ok(None) => &[],
+            Err(rv) => return rv,
+        };
+        let count = mechanisms.len() as CK_ULONG;
+        // Standard PKCS#11 two-call pattern: a NULL list asks for the size.
+        if pMechanismList.is_null() {
+            *pulCount = count;
+            return CKR_OK;
+        }
+        if *pulCount < count {
+            *pulCount = count;
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        std::ptr::copy_nonoverlapping(mechanisms.as_ptr(), pMechanismList, mechanisms.len());
+        *pulCount = count;
         CKR_OK
     })
 }
@@ -446,14 +523,27 @@ pub unsafe extern "C" fn C_GetMechanismList(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn C_GetMechanismInfo(
     slotID: CK_SLOT_ID,
-    _type: CK_MECHANISM_TYPE,
-    _pInfo: *mut CK_MECHANISM_INFO,
+    type_: CK_MECHANISM_TYPE,
+    pInfo: *mut CK_MECHANISM_INFO,
 ) -> CK_RV {
-    with_state(|_| {
+    if pInfo.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    with_state(|state| {
         if slot_role(slotID).is_none() {
             return CKR_SLOT_ID_INVALID;
         }
-        CKR_MECHANISM_INVALID
+        if !MECHANISMS.contains(&type_) {
+            return CKR_MECHANISM_INVALID;
+        }
+        match ecdsa_info(state, slotID) {
+            Ok(Some(info)) => {
+                unsafe { *pInfo = info };
+                CKR_OK
+            }
+            Ok(None) => CKR_MECHANISM_INVALID,
+            Err(rv) => rv,
+        }
     })
 }
 
@@ -485,7 +575,7 @@ pub unsafe extern "C" fn C_OpenSession(
         };
         let handle = state.next_handle;
         state.next_handle += 1;
-        let session = Session { flags, slot: slotID, token_slot: token.slot, find: None };
+        let session = Session { flags, slot: slotID, token_slot: token.slot, find: None, sign: None };
         state.sessions.insert(handle, session);
         unsafe { *phSession = handle };
         CKR_OK
@@ -570,8 +660,9 @@ pub unsafe extern "C" fn C_Login(
         let (slot, token_slot) = (session.slot, session.token_slot);
         match userType {
             CKU_USER => {}
-            // Re-authentication for a single signature; there is no
-            // signing yet, so no operation for it to belong to.
+            // Re-authentication for the signature being made. The daemon
+            // asks for the PIN itself when the signature is due.
+            CKU_CONTEXT_SPECIFIC if session.sign.is_some() => return CKR_OK,
             CKU_CONTEXT_SPECIFIC => return CKR_OPERATION_NOT_INITIALIZED,
             _ => return CKR_USER_TYPE_INVALID,
         }
@@ -751,6 +842,188 @@ pub unsafe extern "C" fn C_GetAttributeValue(
 }
 
 // ---------------------------------------------------------------------------
+// Signing
+// ---------------------------------------------------------------------------
+
+/// A `CK_ULONG` or `CK_BBOOL` attribute value, as the daemon sent it.
+fn ulong(value: &AttrValue) -> Option<CK_ULONG> {
+    match value {
+        AttrValue::Value(v) => Some(CK_ULONG::from_ne_bytes(v.as_slice().try_into().ok()?)),
+        _ => None,
+    }
+}
+
+fn bbool(value: &AttrValue) -> bool {
+    matches!(value, AttrValue::Value(v) if v.first().is_some_and(|&b| b != CK_FALSE))
+}
+
+unsafe fn bytes<'a>(p: *const CK_BYTE, len: CK_ULONG) -> &'a [u8] {
+    if len == 0 { &[] } else { unsafe { std::slice::from_raw_parts(p, len as usize) } }
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn C_SignInit(
+    hSession: CK_SESSION_HANDLE,
+    pMechanism: *mut CK_MECHANISM,
+    hKey: CK_OBJECT_HANDLE,
+) -> CK_RV {
+    if pMechanism.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let mechanism = unsafe { &*pMechanism };
+    with_state(|state| {
+        let (slot, token_slot) = match state.sessions.get(&hSession) {
+            None => return CKR_SESSION_HANDLE_INVALID,
+            Some(session) if session.sign.is_some() => return CKR_OPERATION_ACTIVE,
+            Some(session) => (session.slot, session.token_slot),
+        };
+        if !MECHANISMS.contains(&mechanism.mechanism) {
+            return CKR_MECHANISM_INVALID;
+        }
+        if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
+            return CKR_MECHANISM_PARAM_INVALID;
+        }
+        if !state.logged_in.contains(&slot) {
+            return CKR_USER_NOT_LOGGED_IN;
+        }
+        // Check the key now, so a bad one fails here and not at C_Sign.
+        let types = vec![CKA_CLASS, CKA_KEY_TYPE, CKA_SIGN];
+        let attrs = match request(state, &Request::GetAttrs { slot: token_slot, object: hKey, types }) {
+            Ok(Response::Attrs(attrs)) if attrs.len() == 3 => attrs,
+            Ok(_) => return CKR_DEVICE_ERROR,
+            Err(CKR_OBJECT_HANDLE_INVALID) => return CKR_KEY_HANDLE_INVALID,
+            Err(rv) => return rv,
+        };
+        if ulong(&attrs[0]) != Some(CKO_PRIVATE_KEY) {
+            return CKR_KEY_HANDLE_INVALID;
+        }
+        if ulong(&attrs[1]) != Some(CKK_EC) {
+            return CKR_KEY_TYPE_INCONSISTENT;
+        }
+        if !bbool(&attrs[2]) {
+            return CKR_KEY_FUNCTION_NOT_PERMITTED;
+        }
+        if let Some(session) = state.sessions.get_mut(&hSession) {
+            session.sign = Some(SignOp { mechanism: mechanism.mechanism, key: hKey, message: Vec::new(), signature: None });
+        }
+        CKR_OK
+    })
+}
+
+/// Finish the session's signing operation, optionally with a last piece of
+/// the message, and hand out the signature. Per the spec, a size query or a
+/// too-small buffer keeps the operation going; anything else ends it.
+fn finish_sign(
+    state: &mut State,
+    hSession: CK_SESSION_HANDLE,
+    last: &[u8],
+    pSignature: *mut CK_BYTE,
+    pulSignatureLen: *mut CK_ULONG,
+) -> CK_RV {
+    let Some(session) = state.sessions.get_mut(&hSession) else {
+        return CKR_SESSION_HANDLE_INVALID;
+    };
+    let Some(op) = session.sign.as_mut() else {
+        return CKR_OPERATION_NOT_INITIALIZED;
+    };
+    let signature = match &op.signature {
+        Some(signature) => signature.clone(),
+        None => {
+            op.message.extend_from_slice(last);
+            let req = Request::Sign {
+                slot: session.token_slot,
+                key: op.key,
+                mechanism: CKM_ECDSA,
+                data: to_be_signed(op.mechanism, &op.message),
+            };
+            let slot = session.slot;
+            let result = request(state, &req);
+            // The session can't vanish meanwhile: we hold the state lock.
+            let session = state.sessions.get_mut(&hSession).expect("session");
+            match result {
+                Ok(Response::Signature(signature)) => {
+                    session.sign.as_mut().expect("sign op").signature = Some(signature.clone());
+                    signature
+                }
+                result => {
+                    session.sign = None;
+                    let rv = match result {
+                        Err(rv) => rv,
+                        _ => CKR_DEVICE_ERROR,
+                    };
+                    // The daemon lost our login (card reset, removed): let
+                    // the application log in again.
+                    if rv == CKR_USER_NOT_LOGGED_IN {
+                        state.logged_in.remove(&slot);
+                    }
+                    return rv;
+                }
+            }
+        }
+    };
+
+    let len = signature.len() as CK_ULONG;
+    unsafe {
+        if pSignature.is_null() {
+            *pulSignatureLen = len;
+            return CKR_OK;
+        }
+        if *pulSignatureLen < len {
+            *pulSignatureLen = len;
+            return CKR_BUFFER_TOO_SMALL;
+        }
+        std::ptr::copy_nonoverlapping(signature.as_ptr(), pSignature, signature.len());
+        *pulSignatureLen = len;
+    }
+    if let Some(session) = state.sessions.get_mut(&hSession) {
+        session.sign = None;
+    }
+    CKR_OK
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn C_Sign(
+    hSession: CK_SESSION_HANDLE,
+    pData: *mut CK_BYTE,
+    ulDataLen: CK_ULONG,
+    pSignature: *mut CK_BYTE,
+    pulSignatureLen: *mut CK_ULONG,
+) -> CK_RV {
+    if pulSignatureLen.is_null() || (pData.is_null() && ulDataLen > 0) {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let data = unsafe { bytes(pData, ulDataLen) };
+    with_state(|state| finish_sign(state, hSession, data, pSignature, pulSignatureLen))
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn C_SignUpdate(hSession: CK_SESSION_HANDLE, pPart: *mut CK_BYTE, ulPartLen: CK_ULONG) -> CK_RV {
+    if pPart.is_null() && ulPartLen > 0 {
+        return CKR_ARGUMENTS_BAD;
+    }
+    let part = unsafe { bytes(pPart, ulPartLen) };
+    with_session(hSession, |session| match session.sign.as_mut() {
+        Some(op) if op.signature.is_none() => {
+            op.message.extend_from_slice(part);
+            CKR_OK
+        }
+        _ => CKR_OPERATION_NOT_INITIALIZED,
+    })
+}
+
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn C_SignFinal(
+    hSession: CK_SESSION_HANDLE,
+    pSignature: *mut CK_BYTE,
+    pulSignatureLen: *mut CK_ULONG,
+) -> CK_RV {
+    if pulSignatureLen.is_null() {
+        return CKR_ARGUMENTS_BAD;
+    }
+    with_state(|state| finish_sign(state, hSession, &[], pSignature, pulSignatureLen))
+}
+
+// ---------------------------------------------------------------------------
 // Everything else is unsupported.
 //
 // Each stub still needs its exact C signature: the compiler checks it against
@@ -803,10 +1076,6 @@ not_supported! {
     fn C_DigestKey(H, OBJ);
     fn C_DigestFinal(H, BYTES, PLEN);
 
-    fn C_SignInit(H, MECH, OBJ);
-    fn C_Sign(H, BYTES, LEN, BYTES, PLEN);
-    fn C_SignUpdate(H, BYTES, LEN);
-    fn C_SignFinal(H, BYTES, PLEN);
     fn C_SignRecoverInit(H, MECH, OBJ);
     fn C_SignRecover(H, BYTES, LEN, BYTES, PLEN);
     fn C_VerifyInit(H, MECH, OBJ);

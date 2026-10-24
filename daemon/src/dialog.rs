@@ -11,6 +11,13 @@ const TITLE: &str = "Lithuanian eID";
 /// Seconds before an unanswered dialog counts as cancelled.
 const TIMEOUT: u16 = 60;
 
+/// Why a dialog is shown.
+#[derive(Clone, Copy)]
+pub enum Purpose {
+    Login,
+    Sign,
+}
+
 pub struct Dialogs {
     /// `$LT_EID_PINENTRY`, or `pinentry` from `$PATH`.
     binary: OsString,
@@ -22,13 +29,18 @@ impl Dialogs {
         Dialogs { binary }
     }
 
-    /// Ask the user to let `app` use a token someone already logged in to.
-    pub fn approve(&self, app: &str, token: &Token) -> Result<(), CK_RV> {
+    /// Ask the user to let `app` go ahead without a PIN: to use a token
+    /// someone already logged in to, or to sign.
+    pub fn approve(&self, app: &str, token: &Token, purpose: Purpose) -> Result<(), CK_RV> {
         let Some(mut dialog) = ConfirmationDialog::with_binary(&self.binary) else {
             return Err(missing(&self.binary));
         };
-        dialog.with_title(TITLE).with_ok("Allow").with_cancel("Deny").with_timeout(TIMEOUT);
-        match dialog.confirm(&describe(app, token)) {
+        let ok = match purpose {
+            Purpose::Login => "Allow",
+            Purpose::Sign => "Sign",
+        };
+        dialog.with_title(TITLE).with_ok(ok).with_cancel("Deny").with_timeout(TIMEOUT);
+        match dialog.confirm(&describe(app, token, purpose)) {
             Ok(true) => Ok(()),
             Ok(false) => Err(CKR_FUNCTION_CANCELED),
             Err(e) => Err(failed(e)),
@@ -37,11 +49,11 @@ impl Dialogs {
 
     /// Ask `app`'s user for the PIN of `token`. `error` explains why we ask
     /// again after a failed attempt.
-    pub fn pin(&self, app: &str, token: &Token, error: Option<&str>) -> Result<SecretString, CK_RV> {
+    pub fn pin(&self, app: &str, token: &Token, purpose: Purpose, error: Option<&str>) -> Result<SecretString, CK_RV> {
         let Some(mut input) = PassphraseInput::with_binary(&self.binary) else {
             return Err(missing(&self.binary));
         };
-        let mut description = describe(app, token);
+        let mut description = describe(app, token, purpose);
         if token.flags & CKF_USER_PIN_FINAL_TRY != 0 {
             description += "\n\nThis is the last try: a wrong PIN will block it.";
         } else if token.flags & CKF_USER_PIN_COUNT_LOW != 0 {
@@ -55,7 +67,10 @@ impl Dialogs {
             .with_title(TITLE)
             .with_description(&description)
             .with_prompt(prompt)
-            .with_ok("Log in")
+            .with_ok(match purpose {
+                Purpose::Login => "Log in",
+                Purpose::Sign => "Sign",
+            })
             .with_timeout(TIMEOUT);
         if let Some(error) = error {
             input.with_error(error);
@@ -64,12 +79,14 @@ impl Dialogs {
     }
 }
 
-fn describe(app: &str, token: &Token) -> String {
-    let purpose = match token.role {
-        Role::Auth => "to authenticate you",
-        Role::Qes => "for qualified electronic signatures",
+fn describe(app: &str, token: &Token, purpose: Purpose) -> String {
+    let what = match (purpose, token.role) {
+        (Purpose::Login, Role::Auth) => "to use your eID to authenticate you",
+        (Purpose::Login, Role::Qes) => "to use your eID for qualified electronic signatures",
+        (Purpose::Sign, Role::Auth) => "to sign with your eID authentication key",
+        (Purpose::Sign, Role::Qes) => "to make a qualified electronic signature",
     };
-    format!("{app} wants to use your eID {purpose}.\n\n{}", token.label)
+    format!("{app} wants {what}.\n\n{}", token.label)
 }
 
 fn missing(binary: &OsString) -> CK_RV {

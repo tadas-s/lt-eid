@@ -7,6 +7,9 @@
 //!
 //! Clients never see a PIN. The first client to log in to a token makes the
 //! daemon ask for the PIN; later clients only need the user's approval.
+//! Signing with the authentication key needs nothing more. A qualified
+//! signature always needs the user: PIN.QES if the card wants it for every
+//! signature, otherwise an approval.
 
 mod card;
 mod dialog;
@@ -21,20 +24,20 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 
 use cryptoki_sys::*;
-use lt_eid_proto::{Attr, PROTO_VERSION, Request, Response, Token, read_frame, write_frame};
+use lt_eid_proto::{Attr, PROTO_VERSION, Request, Response, Role, Token, read_frame, write_frame};
 use secrecy::ExposeSecret;
 
 use card::Card;
-use dialog::Dialogs;
+use dialog::{Dialogs, Purpose};
 
 const DEFAULT_MODULE: &str = "/opt/opensc/lib/opensc-pkcs11.so";
 
 struct Daemon {
     card: Mutex<Card>,
-    /// Held for a whole login, dialogs included, so only one dialog shows at
-    /// a time. A client waiting here finds the token logged in by the one
-    /// before it and only needs approval.
-    login: Mutex<()>,
+    /// Held for a whole login or signature that shows a dialog, so only one
+    /// dialog shows at a time. A client waiting here to log in finds the
+    /// token logged in by the one before it and only needs approval.
+    dialog: Mutex<()>,
     dialogs: Dialogs,
 }
 
@@ -51,38 +54,69 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Daemon {
-    fn granted(&self, client: &Client, slot: CK_SLOT_ID) -> Result<bool, CK_RV> {
-        let current = lock(&self.card).login_id(slot)?;
-        Ok(current.is_some() && client.grants.get(&slot).copied() == current)
+    fn granted(&self, client: &Client, slot: CK_SLOT_ID) -> bool {
+        let current = lock(&self.card).login_id(slot);
+        current.is_some() && client.grants.get(&slot).copied() == current
     }
 
     fn login(&self, client: &mut Client, slot: CK_SLOT_ID) -> Result<(), CK_RV> {
-        let _login = lock(&self.login);
+        let _dialog = lock(&self.dialog);
         let (token, current) = {
             let mut card = lock(&self.card);
-            (card.token(slot)?, card.login_id(slot)?)
+            (card.token(slot)?, card.login_id(slot))
         };
         // Card access stays unlocked while a dialog is open.
         let login = match current {
             Some(id) if client.grants.get(&slot) == Some(&id) => id,
             Some(id) => {
-                self.dialogs.approve(&client.app, &token)?;
+                self.dialogs.approve(&client.app, &token, Purpose::Login)?;
                 id
             }
-            None => self.enter_pin(&client.app, token)?,
+            None => self.with_pin(&client.app, token, Purpose::Login, |card, pin| card.login(slot, pin))?,
         };
         client.grants.insert(slot, login);
         Ok(())
     }
 
-    /// Ask for the PIN until the card accepts it or the user gives up.
-    fn enter_pin(&self, app: &str, mut token: Token) -> Result<u64, CK_RV> {
+    fn sign(&self, client: &Client, slot: CK_SLOT_ID, key: u64, mechanism: u64, data: &[u8]) -> Result<Vec<u8>, CK_RV> {
+        if !self.granted(client, slot) {
+            return Err(CKR_USER_NOT_LOGGED_IN);
+        }
+        let (token, always_authenticate) = {
+            let mut card = lock(&self.card);
+            (card.token(slot)?, card.always_authenticate(slot, key)?)
+        };
+        // TLS client authentication: the login was enough.
+        if token.role == Role::Auth && !always_authenticate {
+            return lock(&self.card).sign(slot, key, mechanism, data, None);
+        }
+        let _dialog = lock(&self.dialog);
+        if always_authenticate {
+            return self.with_pin(&client.app, token, Purpose::Sign, |card, pin| {
+                card.sign(slot, key, mechanism, data, Some(pin))
+            });
+        }
+        // The card doesn't want PIN.QES again; still, no qualified signature
+        // without the user saying so.
+        self.dialogs.approve(&client.app, &token, Purpose::Sign)?;
+        lock(&self.card).sign(slot, key, mechanism, data, None)
+    }
+
+    /// Ask for the PIN and run `attempt` with it, until the card accepts it
+    /// or the user gives up.
+    fn with_pin<T>(
+        &self,
+        app: &str,
+        mut token: Token,
+        purpose: Purpose,
+        mut attempt: impl FnMut(&mut Card, &[u8]) -> Result<T, CK_RV>,
+    ) -> Result<T, CK_RV> {
         let mut error = None;
         loop {
             if token.flags & CKF_USER_PIN_LOCKED != 0 {
                 return Err(CKR_PIN_LOCKED);
             }
-            let pin = self.dialogs.pin(app, &token, error.as_deref())?;
+            let pin = self.dialogs.pin(app, &token, purpose, error.as_deref())?;
             let pin = pin.expose_secret().as_bytes();
             // Don't spend a card attempt on a PIN that can't be right.
             let len = pin.len() as u64;
@@ -91,7 +125,7 @@ impl Daemon {
                 continue;
             }
             let mut card = lock(&self.card);
-            match card.login(token.slot, pin) {
+            match attempt(&mut card, pin) {
                 Err(CKR_PIN_INCORRECT) => {
                     error = Some("Wrong PIN.".to_owned());
                     // Refresh the retry-counter flags for the next dialog.
@@ -110,7 +144,7 @@ impl Daemon {
             Request::Find { slot, mut template } => {
                 // Private objects are visible once anyone logged in to the
                 // token; hide them from clients that haven't.
-                if !self.granted(client, slot)? {
+                if !self.granted(client, slot) {
                     template.push(Attr { ty: CKA_PRIVATE, value: vec![CK_FALSE] });
                 }
                 lock(&self.card).find(slot, &template).map(Response::Objects)
@@ -123,6 +157,12 @@ impl Daemon {
                 client.grants.remove(&slot);
                 Ok(Response::Ok)
             }
+            Request::Mechanisms { slot } => lock(&self.card).mechanisms(slot).map(Response::Mechanisms),
+            Request::Sign { slot, key, mechanism, data } => self
+                .sign(client, slot, key, mechanism, &data)
+                .map(Response::Signature)
+                // The spec's code for "the user rejected the signature".
+                .map_err(|rv| if rv == CKR_FUNCTION_CANCELED { CKR_FUNCTION_REJECTED } else { rv }),
         }
     }
 }
@@ -192,7 +232,7 @@ fn main() {
     };
     let daemon = Arc::new(Daemon {
         card: Mutex::new(card),
-        login: Mutex::new(()),
+        dialog: Mutex::new(()),
         dialogs: Dialogs::new(),
     });
     let listener = match bind(&socket) {

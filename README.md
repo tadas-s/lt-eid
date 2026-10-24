@@ -26,13 +26,15 @@ connection to the card, so PACE runs once and clients never fight over it.
 - Two fixed slots: 0 is the authentication token ("PACE-PIN"), 1 the
   qualified signature token ("PIN.QES"). The daemon tells them apart by the
   OpenSC token label.
-- Slot and token info, object search, `C_GetAttributeValue` and login go to
-  the daemon. Crypto still returns `CKR_FUNCTION_NOT_SUPPORTED`.
+- Slot and token info, object search, `C_GetAttributeValue`, login and
+  signing go to the daemon. Other crypto (verify, decrypt, ...) returns
+  `CKR_FUNCTION_NOT_SUPPORTED`.
 - Sessions are local to the module. The daemon keeps one shared read-only
   session per OpenSC slot and runs each search start to finish under its lock.
 - With the daemon down, the module still loads and shows empty slots;
   operations on open sessions return `CKR_DEVICE_REMOVED`. Clients reconnect
-  on their own once the daemon is back.
+  on their own once the daemon is back, and must log in again (object
+  handles from before the restart are invalid).
 
 ## Login
 
@@ -52,6 +54,28 @@ driver's logout tears down PACE, logging out both tokens).
 
 Until an application is logged in to a token, searches only return its
 public objects, even if the card itself is logged in.
+
+## Signing
+
+The module offers `CKM_ECDSA` and `CKM_ECDSA_SHA256/384/512` (when the card
+offers `CKM_ECDSA`). It hashes the message itself, so the card only ever does
+raw `CKM_ECDSA`; single- and multi-part signing both work. The daemon signs
+in one go under the card lock, and the module keeps the signature for the
+second call of the size-query pattern, so the card signs once.
+
+What the user sees per signature:
+
+- authentication key: nothing; logging in was enough.
+- a key with `CKA_ALWAYS_AUTHENTICATE` (expected for the QES key): a PIN
+  dialog. The daemon logs in for that one signature
+  (`CKU_CONTEXT_SPECIFIC`); an application's own context-specific `C_Login`
+  is accepted without a PIN.
+- a QES key without it: an approval dialog.
+
+A refused or cancelled signature returns `CKR_FUNCTION_REJECTED`. After a
+failed signature the daemon replaces its shared session, since PKCS#11 2.40
+can't cancel an operation (it opens the new session first: closing a slot's
+last session would log it out).
 
 Dialogs use `pinentry` from `$PATH`, or `$LT_EID_PINENTRY`. Start `lt-eidd`
 from inside the desktop session so pinentry can open a window.

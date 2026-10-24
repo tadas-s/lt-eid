@@ -9,7 +9,7 @@ use std::path::Path;
 use std::ptr::null_mut;
 
 use cryptoki_sys::*;
-use lt_eid_proto::{Attr, AttrValue, Role, Token};
+use lt_eid_proto::{Attr, AttrValue, Mechanism, Role, Token};
 
 fn check(rv: CK_RV) -> Result<(), CK_RV> {
     if rv == CKR_OK { Ok(()) } else { Err(rv) }
@@ -31,8 +31,12 @@ pub struct Card {
     /// first use. Login state is per token anyway, so per-client sessions
     /// would not isolate anything.
     sessions: HashMap<CK_SLOT_ID, CK_SESSION_HANDLE>,
-    /// A fresh number for every login we perform. Approvals are tied to it,
-    /// so they don't outlive a card reset or swap.
+    /// Slots we logged in to, each with a fresh number per login. Approvals
+    /// are tied to it, so they don't outlive a card reset or swap.
+    ///
+    /// This is our own record, kept instead of asking OpenSC: its
+    /// `C_GetSessionInfo` asks the card, and the card reports PIN.QES as not
+    /// verified even right after a successful login.
     logins: HashMap<CK_SLOT_ID, u64>,
     last_login: u64,
 }
@@ -59,8 +63,9 @@ impl Card {
         let mut slots = vec![0; count as usize];
         check(unsafe { self.p11.C_GetSlotList(CK_TRUE, slots.as_mut_ptr(), &mut count) })?;
         slots.truncate(count as usize);
-        // A session on a slot whose token is gone is dead.
+        // A session or login on a slot whose token is gone is dead.
         self.sessions.retain(|slot, _| slots.contains(slot));
+        self.logins.retain(|slot, _| slots.contains(slot));
 
         let mut tokens = Vec::new();
         for slot in slots {
@@ -115,25 +120,42 @@ impl Card {
                 }
             };
             match f(&self.p11, session) {
+                // The card was reinserted: the session and login are gone.
                 Err(CKR_SESSION_HANDLE_INVALID | CKR_SESSION_CLOSED) => {
                     self.sessions.remove(&slot);
+                    self.logins.remove(&slot);
                 }
-                result => return result,
+                result => {
+                    if let Err(CKR_USER_NOT_LOGGED_IN | CKR_DEVICE_REMOVED | CKR_TOKEN_NOT_PRESENT) = result {
+                        self.logins.remove(&slot);
+                    }
+                    return result;
+                }
             }
         }
         Err(CKR_SESSION_HANDLE_INVALID)
     }
 
+    /// Swap the shared session for a fresh one, dropping whatever operation
+    /// the old one was in the middle of. The new session opens first:
+    /// closing a token's last session would log it out.
+    fn replace_session(&mut self, slot: CK_SLOT_ID) {
+        let Some(old) = self.sessions.remove(&slot) else {
+            return;
+        };
+        let mut new = 0;
+        let rv = unsafe { self.p11.C_OpenSession(slot, CKF_SERIAL_SESSION, null_mut(), None, &mut new) };
+        // If none opens, the token is gone and the old session with it.
+        if rv == CKR_OK {
+            self.sessions.insert(slot, new);
+            unsafe { self.p11.C_CloseSession(old) };
+        }
+    }
+
     /// The number of the current login on `slot`, or `None` if the token is
     /// logged out.
-    pub fn login_id(&mut self, slot: CK_SLOT_ID) -> Result<Option<u64>, CK_RV> {
-        let state = self.with_session(slot, |p11, session| {
-            let mut info: CK_SESSION_INFO = unsafe { std::mem::zeroed() };
-            check(unsafe { p11.C_GetSessionInfo(session, &mut info) })?;
-            Ok(info.state)
-        })?;
-        let logged_in = matches!(state, CKS_RO_USER_FUNCTIONS | CKS_RW_USER_FUNCTIONS);
-        Ok(logged_in.then(|| self.logins.get(&slot).copied().unwrap_or(0)))
+    pub fn login_id(&self, slot: CK_SLOT_ID) -> Option<u64> {
+        self.logins.get(&slot).copied()
     }
 
     /// Log the token in `slot` in and return the new login's number.
@@ -141,17 +163,82 @@ impl Card {
     /// There is deliberately no logout: the lteid driver tears down the PACE
     /// channel on logout, which would log out every token on the card.
     pub fn login(&mut self, slot: CK_SLOT_ID, pin: &[u8]) -> Result<u64, CK_RV> {
-        let rv = self.with_session(slot, |p11, session| {
+        self.with_session(slot, |p11, session| {
             // OpenSC only reads the PIN, the `*mut` is a C API wart.
-            check(unsafe { p11.C_Login(session, CKU_USER, pin.as_ptr() as *mut _, pin.len() as CK_ULONG) })
-        });
-        match rv {
-            Ok(()) | Err(CKR_USER_ALREADY_LOGGED_IN) => {}
-            Err(rv) => return Err(rv),
-        }
+            let (pin, len) = (pin.as_ptr() as *mut _, pin.len() as CK_ULONG);
+            match unsafe { p11.C_Login(session, CKU_USER, pin, len) } {
+                // OpenSC still counts an earlier login that we no longer
+                // trust (the card lost it), and returns without checking the
+                // PIN. A context-specific login makes the card check it.
+                CKR_USER_ALREADY_LOGGED_IN => check(unsafe { p11.C_Login(session, CKU_CONTEXT_SPECIFIC, pin, len) }),
+                rv => check(rv),
+            }
+        })?;
         self.last_login += 1;
         self.logins.insert(slot, self.last_login);
         Ok(self.last_login)
+    }
+
+    pub fn mechanisms(&mut self, slot: CK_SLOT_ID) -> Result<Vec<Mechanism>, CK_RV> {
+        let mut count: CK_ULONG = 0;
+        check(unsafe { self.p11.C_GetMechanismList(slot, null_mut(), &mut count) })?;
+        let mut types = vec![0; count as usize];
+        check(unsafe { self.p11.C_GetMechanismList(slot, types.as_mut_ptr(), &mut count) })?;
+        types.truncate(count as usize);
+        types
+            .into_iter()
+            .map(|ty| {
+                let mut info: CK_MECHANISM_INFO = unsafe { std::mem::zeroed() };
+                check(unsafe { self.p11.C_GetMechanismInfo(slot, ty, &mut info) })?;
+                Ok(Mechanism {
+                    ty,
+                    min_key_size: info.ulMinKeySize,
+                    max_key_size: info.ulMaxKeySize,
+                    flags: info.flags,
+                })
+            })
+            .collect()
+    }
+
+    /// Whether `key` needs the PIN again for every signature.
+    pub fn always_authenticate(&mut self, slot: CK_SLOT_ID, key: CK_OBJECT_HANDLE) -> Result<bool, CK_RV> {
+        let values = self.get_attrs(slot, key, &[CKA_ALWAYS_AUTHENTICATE])?;
+        Ok(matches!(values.first(), Some(AttrValue::Value(v)) if v.first().is_some_and(|&b| b != CK_FALSE)))
+    }
+
+    /// Sign `data` with `key`. With `pin`, log in for this one signature
+    /// first (`CKU_CONTEXT_SPECIFIC`), as keys with `CKA_ALWAYS_AUTHENTICATE`
+    /// require.
+    pub fn sign(
+        &mut self,
+        slot: CK_SLOT_ID,
+        key: CK_OBJECT_HANDLE,
+        mechanism: CK_MECHANISM_TYPE,
+        data: &[u8],
+        pin: Option<&[u8]>,
+    ) -> Result<Vec<u8>, CK_RV> {
+        let mut started = false;
+        let result = self.with_session(slot, |p11, session| unsafe {
+            let mut mechanism = CK_MECHANISM { mechanism, pParameter: null_mut(), ulParameterLen: 0 };
+            check(p11.C_SignInit(session, &mut mechanism, key))?;
+            started = true;
+            if let Some(pin) = pin {
+                // OpenSC only reads the PIN, the `*mut` is a C API wart.
+                check(p11.C_Login(session, CKU_CONTEXT_SPECIFIC, pin.as_ptr() as *mut _, pin.len() as CK_ULONG))?;
+            }
+            // Big enough for any EC or RSA signature, so no size query.
+            let mut signature = vec![0u8; 1024];
+            let mut len = signature.len() as CK_ULONG;
+            check(p11.C_Sign(session, data.as_ptr() as *mut _, data.len() as CK_ULONG, signature.as_mut_ptr(), &mut len))?;
+            signature.truncate(len as usize);
+            Ok(signature)
+        });
+        // After a failure the operation may still be active, and PKCS#11
+        // 2.40 has no way to cancel it.
+        if result.is_err() && started {
+            self.replace_session(slot);
+        }
+        result
     }
 
     pub fn find(&mut self, slot: CK_SLOT_ID, template: &[Attr]) -> Result<Vec<u64>, CK_RV> {

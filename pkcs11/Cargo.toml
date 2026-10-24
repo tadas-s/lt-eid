@@ -11,3 +11,4 @@ crate-type = ["cdylib"]
 [dependencies]
 cryptoki-sys.workspace = true
 lt-eid-proto.workspace = true
+sha2 = "0.10"

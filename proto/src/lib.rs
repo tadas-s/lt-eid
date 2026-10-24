@@ -12,7 +12,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to `Request` or `Response`.
-pub const PROTO_VERSION: u32 = 3;
+pub const PROTO_VERSION: u32 = 4;
 
 /// Upper bound for a single frame. Certificates are the largest payload.
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -34,6 +34,11 @@ pub enum Request {
     Login { slot: u64 },
     /// Log this client out. The card itself stays logged in for others.
     Logout { slot: u64 },
+    /// The token's mechanisms, as OpenSC reports them.
+    Mechanisms { slot: u64 },
+    /// Sign `data` with a mechanism that takes no parameters, in one go.
+    /// May show a dialog (PIN or approval) and block until it is answered.
+    Sign { slot: u64, key: u64, mechanism: u64, data: Vec<u8> },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -44,6 +49,8 @@ pub enum Response {
     Objects(Vec<u64>),
     /// One entry per requested type.
     Attrs(Vec<AttrValue>),
+    Mechanisms(Vec<Mechanism>),
+    Signature(Vec<u8>),
     /// The request failed with this `CK_RV`.
     Rv(u64),
 }
@@ -62,6 +69,15 @@ pub struct Token {
     pub flags: u64,
     pub min_pin_len: u64,
     pub max_pin_len: u64,
+}
+
+/// A `CK_MECHANISM_INFO` with its mechanism type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Mechanism {
+    pub ty: u64,
+    pub min_key_size: u64,
+    pub max_key_size: u64,
+    pub flags: u64,
 }
 
 /// What a token is for. OpenSC shows one token per PIN on the card.
