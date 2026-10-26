@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 //! PIN and approval dialogs, shown through pinentry.
 
 use std::ffi::OsString;

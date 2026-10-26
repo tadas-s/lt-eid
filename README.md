@@ -183,3 +183,9 @@ create `~/.config/pkcs11/modules/lt-eid.module` containing:
   `fork()`; only one request per process is in flight.
 - `panic = "abort"` is set in the release profile, so a Rust panic never unwinds
   into the C caller.
+
+## License
+
+LGPL-2.1-or-later, the same as OpenSC (see `LICENSE`). Any program may load
+the PKCS#11 module; whoever distributes a modified lt-eid must publish the
+changes under the same license.

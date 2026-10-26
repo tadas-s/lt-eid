@@ -3,6 +3,7 @@ name = "lt-eid-daemon"
 description = "Owns the Lithuanian eID card connection and serves lt-eid PKCS#11 clients"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
 name = "lt-eidd"

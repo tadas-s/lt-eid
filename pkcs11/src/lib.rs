@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 //! The lt-eid PKCS#11 module.
 //!
 //! It never talks to the card itself. It forwards to the lt-eid daemon over

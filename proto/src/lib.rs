@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 //! Wire protocol between the lt-eid PKCS#11 module and the lt-eid daemon.
 //!
 //! The module connects to a unix stream socket and sends `Request`s; the

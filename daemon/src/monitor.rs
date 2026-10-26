@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 //! Watches the card readers for a Lithuanian eID being inserted.
 //!
 //! Watching reads PC/SC reader status only: the card itself stays with

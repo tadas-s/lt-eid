@@ -3,6 +3,7 @@ name = "lt-eid-proto"
 description = "Wire protocol between the lt-eid PKCS#11 module and daemon"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 serde.workspace = true

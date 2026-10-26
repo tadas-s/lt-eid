@@ -11,12 +11,13 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
-# lt-eid itself: not chosen yet. OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
-# Vendored Rust crates: see cargo-licenses.txt.
-License:        LicenseRef-TBD AND LGPL-2.1-or-later AND BSD-3-Clause
+# lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
+# Rust crates compiled in: Apache-2.0 (cryptoki-sys), ISC (libloading), MIT,
+# MIT OR Apache-2.0, Unlicense OR MIT; cargo-licenses.txt has the tally.
+License:        LGPL-2.1-or-later AND BSD-3-Clause AND Apache-2.0 AND ISC AND MIT AND (MIT OR Apache-2.0) AND (Unlicense OR MIT)
 Source0:        %{name}-%{version}.tar.gz
 Source1:        %{name}-%{version}-vendor.tar.xz
 Source2:        opensc-%{opensc_version}.tar.gz
@@ -125,7 +126,7 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %systemd_user_preun lt-eidd.socket lt-eidd.service
 
 %files
-%license COPYING.opensc cargo-licenses.txt
+%license LICENSE COPYING.opensc cargo-licenses.txt
 %doc README.md
 %dir %{ltdir}
 %dir %{ltdir}/bin
@@ -147,6 +148,9 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Mon Oct 26 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-3
+- License lt-eid under LGPL-2.1-or-later, like OpenSC
+
 * Mon Oct 26 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-2
 - Ask for the CAN when a card the cached CAN does not open is inserted
 - Run lt-eidd (and its socket) only in a regular user's desktop session

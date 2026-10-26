@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 //! lt-eidd: owns the one connection to the Lithuanian eID card.
 //!
 //! It loads a private OpenSC PKCS#11 module and serves lt-eid PKCS#11

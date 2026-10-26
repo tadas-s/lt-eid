@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: LGPL-2.1-or-later
 //! The card, as seen through OpenSC's PKCS#11 module.
 //!
 //! OpenSC is driven through raw `C_*` calls: attribute values and `CK_RV`
