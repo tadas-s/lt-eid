@@ -11,5 +11,6 @@ path = "src/main.rs"
 [dependencies]
 cryptoki-sys.workspace = true
 lt-eid-proto.workspace = true
+pcsc = "2.9.0"
 pinentry = "0.8.0"
 secrecy = "0.10"

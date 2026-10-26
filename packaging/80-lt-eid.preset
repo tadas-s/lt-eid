@@ -1,2 +1,3 @@
-# Start lt-eidd on demand for every user.
+# Run lt-eidd in every regular user's desktop session.
 enable lt-eidd.socket
+enable lt-eidd.service

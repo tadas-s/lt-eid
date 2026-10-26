@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid itself: not chosen yet. OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -119,10 +119,10 @@ cp -p opensc/COPYING COPYING.opensc
 cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-licenses.txt
 
 %post
-%systemd_user_post lt-eidd.socket
+%systemd_user_post lt-eidd.socket lt-eidd.service
 
 %preun
-%systemd_user_preun lt-eidd.socket
+%systemd_user_preun lt-eidd.socket lt-eidd.service
 
 %files
 %license COPYING.opensc cargo-licenses.txt
@@ -147,5 +147,9 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Mon Oct 26 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-2
+- Ask for the CAN when a card the cached CAN does not open is inserted
+- Run lt-eidd (and its socket) only in a regular user's desktop session
+
 * Sat Oct 24 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-1
 - First package: proxy module, lt-eidd and a private OpenSC in /opt/lt-eid

@@ -1,5 +1,8 @@
 [Unit]
 Description=Lithuanian eID daemon socket
+# Only in a regular user's desktop session, like the daemon.
+PartOf=graphical-session.target
+ConditionEnvironment=XDG_SESSION_CLASS=user
 
 [Socket]
 # Where the lt-eid PKCS#11 module looks: $XDG_RUNTIME_DIR/lt-eid/sock
@@ -8,4 +11,4 @@ SocketMode=0600
 DirectoryMode=0700
 
 [Install]
-WantedBy=sockets.target
+WantedBy=graphical-session.target

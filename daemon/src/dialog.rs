@@ -12,6 +12,7 @@ use secrecy::SecretString;
 const TITLE: &str = "Lithuanian eID";
 /// Seconds before an unanswered dialog counts as cancelled.
 const TIMEOUT: u16 = 60;
+const CAN_TIMEOUT: u16 = 300;
 
 /// Why a dialog is shown.
 #[derive(Clone, Copy)]
@@ -110,6 +111,28 @@ impl Dialogs {
                 Purpose::Sign => "Sign",
             })
             .with_timeout(TIMEOUT);
+        if let Some(error) = error {
+            input.with_error(error);
+        }
+        input.interact().map_err(failed)
+    }
+
+    /// Ask for the card access number of a newly inserted card. `error`
+    /// explains why we ask again after a failed attempt.
+    pub fn can(&self, error: Option<&str>) -> Result<SecretString, CK_RV> {
+        let Some(mut input) = PassphraseInput::with_binary(&self.binary) else {
+            return Err(missing(&self.binary));
+        };
+        input
+            .with_title(TITLE)
+            .with_description(
+                "A Lithuanian eID card was inserted. To use it, enter its card access number (CAN): \
+                 the 6 digits in the bottom right corner of the card's front.",
+            )
+            .with_prompt("Card access number")
+            .with_ok("Continue")
+            // Long enough to go and find the card.
+            .with_timeout(CAN_TIMEOUT);
         if let Some(error) = error {
             input.with_error(error);
         }

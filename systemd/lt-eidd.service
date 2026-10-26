@@ -1,9 +1,16 @@
 [Unit]
 Description=Lithuanian eID daemon
-# Started by its socket on the first PKCS#11 client.
+# Only in a regular user's desktop session: its dialogs need the display,
+# and it asks for the CAN of a newly inserted card. Clients that connect
+# early wait on the socket.
 Requires=lt-eidd.socket
-After=lt-eidd.socket
+After=lt-eidd.socket graphical-session.target
+BindsTo=graphical-session.target
+ConditionEnvironment=XDG_SESSION_CLASS=user
 
 [Service]
 ExecStart=/opt/lt-eid/bin/lt-eidd
 Restart=on-failure
+
+[Install]
+WantedBy=graphical-session.target

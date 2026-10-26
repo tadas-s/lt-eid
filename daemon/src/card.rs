@@ -5,7 +5,8 @@
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::ptr::null_mut;
 
 use cryptoki_sys::*;
@@ -25,8 +26,34 @@ fn role(label: &str) -> Role {
     if label.ends_with("(PIN.QES)") { Role::Qes } else { Role::Auth }
 }
 
+/// Why storing a CAN failed.
+pub enum CanError {
+    /// The card refused it.
+    Wrong,
+    /// Anything else, with lteid-tool's explanation.
+    Failed(String),
+}
+
+fn initialize(p11: &Pkcs11) -> Result<(), CK_RV> {
+    let mut args = CK_C_INITIALIZE_ARGS {
+        CreateMutex: None,
+        DestroyMutex: None,
+        LockMutex: None,
+        UnlockMutex: None,
+        flags: CKF_OS_LOCKING_OK,
+        pReserved: null_mut(),
+    };
+    check(unsafe { p11.C_Initialize(&mut args as *mut _ as *mut c_void) })
+}
+
 pub struct Card {
     p11: Pkcs11,
+    /// False after a failed restart of OpenSC (see `store_can`); the next
+    /// use tries again.
+    initialized: bool,
+    /// The lteid-tool of the same OpenSC build: `<prefix>/bin/lteid-tool`
+    /// for `<prefix>/lib/opensc-pkcs11.so`.
+    lteid_tool: PathBuf,
     /// One read-only session per slot, shared by all clients and opened on
     /// first use. Login state is per token anyway, so per-client sessions
     /// would not isolate anything.
@@ -44,20 +71,68 @@ pub struct Card {
 impl Card {
     pub fn open(module: &Path) -> Result<Self, String> {
         let p11 = unsafe { Pkcs11::new(module) }.map_err(|e| e.to_string())?;
-        let mut args = CK_C_INITIALIZE_ARGS {
-            CreateMutex: None,
-            DestroyMutex: None,
-            LockMutex: None,
-            UnlockMutex: None,
-            flags: CKF_OS_LOCKING_OK,
-            pReserved: null_mut(),
-        };
-        check(unsafe { p11.C_Initialize(&mut args as *mut _ as *mut c_void) })
-            .map_err(|rv| format!("C_Initialize: {rv:#x}"))?;
-        Ok(Card { p11, sessions: HashMap::new(), logins: HashMap::new(), last_login: 0 })
+        initialize(&p11).map_err(|rv| format!("C_Initialize: {rv:#x}"))?;
+        let prefix = module.parent().and_then(Path::parent).unwrap_or(Path::new("/"));
+        Ok(Card {
+            p11,
+            initialized: true,
+            lteid_tool: prefix.join("bin/lteid-tool"),
+            sessions: HashMap::new(),
+            logins: HashMap::new(),
+            last_login: 0,
+        })
+    }
+
+    fn ready(&mut self) -> Result<(), CK_RV> {
+        if !self.initialized {
+            initialize(&self.p11)?;
+            self.initialized = true;
+        }
+        Ok(())
+    }
+
+    /// Finalize OpenSC, which lets go of the card. Every session and login
+    /// ends; the next use starts OpenSC again.
+    pub fn release(&mut self) {
+        if self.initialized {
+            unsafe { self.p11.C_Finalize(null_mut()) };
+            self.initialized = false;
+        }
+        self.sessions.clear();
+        self.logins.clear();
+    }
+
+    /// Check `can` on the card and store it for the lteid driver, using
+    /// lteid-tool. OpenSC is restarted around it: it must let go of the card
+    /// for lteid-tool, and it would not retry a card it failed to open until
+    /// the card is reinserted. Every session and login ends.
+    pub fn store_can(&mut self, can: &str) -> Result<(), CanError> {
+        self.release();
+
+        // Through the environment, so the CAN doesn't show up in ps.
+        let output = Command::new(&self.lteid_tool)
+            .args(["--verify-can", "--can", "env:LT_EID_CAN"])
+            .env("LT_EID_CAN", can)
+            .stdin(Stdio::null())
+            .output();
+
+        if let Err(rv) = self.ready() {
+            eprintln!("restarting OpenSC: C_Initialize: {rv:#x}");
+        }
+        let output = output.map_err(|e| CanError::Failed(format!("{}: {e}", self.lteid_tool.display())))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if stderr.contains("CAN number verification failed") {
+            Err(CanError::Wrong)
+        } else {
+            Err(CanError::Failed(stderr.trim().to_owned()))
+        }
     }
 
     pub fn tokens(&mut self) -> Result<Vec<Token>, CK_RV> {
+        self.ready()?;
         let mut count: CK_ULONG = 0;
         check(unsafe { self.p11.C_GetSlotList(CK_TRUE, null_mut(), &mut count) })?;
         let mut slots = vec![0; count as usize];
@@ -72,8 +147,9 @@ impl Card {
             let mut info: CK_TOKEN_INFO = unsafe { std::mem::zeroed() };
             match unsafe { self.p11.C_GetTokenInfo(slot, &mut info) } {
                 CKR_OK => {}
-                // Removed between the two calls.
-                CKR_TOKEN_NOT_PRESENT => continue,
+                // Removed between the two calls, or a card OpenSC can't
+                // read: no lteid card, or one without a working CAN.
+                CKR_TOKEN_NOT_PRESENT | CKR_TOKEN_NOT_RECOGNIZED => continue,
                 rv => return Err(rv),
             }
             // OpenSC adds an empty slot for card-initialization tools.
@@ -107,6 +183,7 @@ impl Card {
         slot: CK_SLOT_ID,
         mut f: impl FnMut(&Pkcs11, CK_SESSION_HANDLE) -> Result<T, CK_RV>,
     ) -> Result<T, CK_RV> {
+        self.ready()?;
         for _ in 0..2 {
             let session = match self.sessions.get(&slot) {
                 Some(&session) => session,
@@ -180,6 +257,7 @@ impl Card {
     }
 
     pub fn mechanisms(&mut self, slot: CK_SLOT_ID) -> Result<Vec<Mechanism>, CK_RV> {
+        self.ready()?;
         let mut count: CK_ULONG = 0;
         check(unsafe { self.p11.C_GetMechanismList(slot, null_mut(), &mut count) })?;
         let mut types = vec![0; count as usize];

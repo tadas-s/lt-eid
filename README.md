@@ -56,6 +56,28 @@ driver's logout tears down PACE, logging out both tokens).
 Until an application is logged in to a token, searches only return its
 public objects, even if the card itself is logged in.
 
+## Card access number (CAN)
+
+The card only talks to OpenSC after PACE with its CAN, the 6 digits on the
+front. The lteid driver keeps one CAN in `~/.cache/opensc/lteid_can`.
+
+`lt-eidd` watches the readers (PC/SC status only, without connecting). When a
+card with the Lithuanian eID ATR is inserted, or is already in when the
+daemon starts, and OpenSC can't open it with the cached CAN, the daemon asks
+for the CAN. It then stores it with `lteid-tool --verify-can` (from the same
+OpenSC build as the module, `<prefix>/bin/lteid-tool`), restarting its OpenSC
+around that: OpenSC must let go of the card, and it won't retry a card it
+failed to open until the card is reinserted. A wrong CAN asks again; after a
+cancel, reinserting the card asks again.
+
+To see the dialog in time, `lt-eidd.service` starts with the desktop session
+(`graphical-session.target`).
+
+Both units run only in a regular user's desktop session
+(`ConditionEnvironment=XDG_SESSION_CLASS=user`, bound to
+`graphical-session.target`) and stop at logout. Outside one there is no
+socket, and the module shows empty slots.
+
 ## Signing
 
 The module offers `CKM_ECDSA` and `CKM_ECDSA_SHA256/384/512` (when the card
@@ -99,15 +121,15 @@ from inside the desktop session so pinentry can open a window.
 
 ### As a systemd user service
 
-`systemd/` has a socket unit and a service: systemd listens on
-`$XDG_RUNTIME_DIR/lt-eid/sock` and starts `lt-eidd` on the first client. The
+`systemd/` has a socket unit and a service: in a desktop session systemd
+listens on `$XDG_RUNTIME_DIR/lt-eid/sock` and runs `lt-eidd`. The
 service inherits the desktop session's environment, which pinentry needs to
 open its window.
 
     systemctl --user link $PWD/systemd/lt-eidd.socket $PWD/systemd/lt-eidd.service
-    systemctl --user enable --now lt-eidd.socket
+    systemctl --user enable lt-eidd.socket lt-eidd.service   # from the next desktop login
 
-The service runs `/usr/bin/lt-eidd`. To run a development build instead, add
+The service runs `/opt/lt-eid/bin/lt-eidd`. To run a development build instead, add
 a drop-in (`systemctl --user edit lt-eidd.service`):
 
     [Service]

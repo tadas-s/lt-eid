@@ -10,9 +10,14 @@
 //! Signing with the authentication key needs nothing more. A qualified
 //! signature always needs the user: PIN.QES if the card wants it for every
 //! signature, otherwise an approval.
+//!
+//! A card can only be opened with its card access number (CAN), which the
+//! lteid driver keeps in a cache. When a card is inserted that the cached
+//! CAN doesn't open, the daemon asks for its CAN.
 
 mod card;
 mod dialog;
+mod monitor;
 
 use std::collections::HashMap;
 use std::fs;
@@ -28,7 +33,7 @@ use cryptoki_sys::*;
 use lt_eid_proto::{Attr, PROTO_VERSION, Request, Response, Role, Token, read_frame, write_frame};
 use secrecy::ExposeSecret;
 
-use card::Card;
+use card::{Card, CanError};
 use dialog::{Dialogs, Purpose};
 
 /// The private OpenSC build packaged with lt-eid.
@@ -134,6 +139,57 @@ impl Daemon {
                     token = card.token(token.slot)?;
                 }
                 result => return result,
+            }
+        }
+    }
+
+    /// A Lithuanian eID was inserted into `reader`. If the cached CAN
+    /// doesn't open it, ask for the card's CAN until it works or the user
+    /// gives up; the next try is when the card is inserted again.
+    fn card_inserted(&self, reader: &str) {
+        let _dialog = lock(&self.dialog);
+        // OpenSC opens the card with the cached CAN, if it has one that works.
+        let has_tokens = |card: &mut Card| card.tokens().is_ok_and(|tokens| !tokens.is_empty());
+        {
+            let mut card = lock(&self.card);
+            if has_tokens(&mut card) {
+                return;
+            }
+            // No tokens also when another program has the card open: then
+            // the CAN is not the problem. To tell, OpenSC must let go of it.
+            card.release();
+            if monitor::held_by_another(reader) {
+                eprintln!("{reader}: card in use by another program, not asking for its CAN");
+                return;
+            }
+        }
+        eprintln!("{reader}: card needs its CAN");
+        let mut error = None;
+        loop {
+            let Ok(can) = self.dialogs.can(error.as_deref()) else {
+                eprintln!("{reader}: no CAN entered");
+                return;
+            };
+            let can = can.expose_secret();
+            if can.len() != 6 || !can.bytes().all(|b| b.is_ascii_digit()) {
+                error = Some("The CAN has 6 digits.".to_owned());
+                continue;
+            }
+            let mut card = lock(&self.card);
+            match card.store_can(can) {
+                Ok(()) if has_tokens(&mut card) => {
+                    eprintln!("{reader}: CAN stored, card ready");
+                    return;
+                }
+                Ok(()) => {
+                    eprintln!("{reader}: CAN stored, but OpenSC still can't open the card");
+                    return;
+                }
+                Err(CanError::Wrong) => error = Some("Wrong CAN. Check the number on the card.".to_owned()),
+                Err(CanError::Failed(why)) => {
+                    eprintln!("{reader}: storing the CAN failed: {why}");
+                    return;
+                }
             }
         }
     }
@@ -260,6 +316,16 @@ fn main() {
         dialog: Mutex::new(()),
         dialogs: Dialogs::new(),
     });
+    let watched = Arc::clone(&daemon);
+    thread::spawn(move || {
+        monitor::watch(|reader| {
+            let daemon = Arc::clone(&watched);
+            let reader = reader.to_owned();
+            // Off the monitor thread: the CAN dialog can take minutes.
+            thread::spawn(move || daemon.card_inserted(&reader));
+        })
+    });
+
     let listener = match activated {
         Some(listener) => {
             eprintln!("using {}, listening on the socket from systemd", module.display());
