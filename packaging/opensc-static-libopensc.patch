@@ -1,0 +1,72 @@
+Build libopensc as an internal (convenience) library
+
+lt-eid ships a private OpenSC next to the system one. Linking libopensc
+statically into opensc-pkcs11.so and the tools means no libopensc.so is
+installed that could clash with the system library. libscdl and libcompat
+are already part of libopensc, so they are dropped from the link lists
+where they would now be linked twice.
+
+diff --git a/src/libopensc/Makefile.am b/src/libopensc/Makefile.am
+index 2b91c358a..84ad82473 100644
+--- a/src/libopensc/Makefile.am
++++ b/src/libopensc/Makefile.am
+@@ -4,7 +4,7 @@ MAINTAINERCLEANFILES = $(srcdir)/Makefile.in
+ 
+ EXTRA_DIST = Makefile.mak
+ 
+-lib_LTLIBRARIES = libopensc.la
++noinst_LTLIBRARIES = libopensc.la
+ noinst_HEADERS = cards.h ctbcs.h internal.h muscle.h muscle-filesystem.h \
+ 	internal-winscard.h pkcs15-syn.h pkcs15-emulator-filter.h \
+ 	opensc.h pkcs15.h gp.h \
+@@ -101,7 +101,7 @@ mylib_DATA=.libs/@WIN_LIBPREFIX@opensc-@OPENSC_LT_OLDEST@.dll.def
+ .libs/@WIN_LIBPREFIX@opensc-@OPENSC_LT_OLDEST@.dll.def:	libopensc.la
+ 
+ if ENABLE_MINIDRIVER
+-noinst_LTLIBRARIES = libopensc_static.la
++noinst_LTLIBRARIES += libopensc_static.la
+ endif
+ endif
+ 
+diff --git a/src/pkcs11/Makefile.am b/src/pkcs11/Makefile.am
+index 97b039e61..db2dbcb35 100644
+--- a/src/pkcs11/Makefile.am
++++ b/src/pkcs11/Makefile.am
+@@ -20,8 +20,6 @@ OPENSC_PKCS11_CFLAGS = \
+ 	$(OPENPACE_CFLAGS) $(OPTIONAL_OPENSSL_CFLAGS) $(OPENSC_PKCS11_PTHREAD_CFLAGS)
+ OPENSC_PKCS11_LIBS = \
+ 	$(top_builddir)/src/libopensc/libopensc.la \
+-	$(top_builddir)/src/common/libscdl.la \
+-	$(top_builddir)/src/common/libcompat.la \
+ 	$(OPENPACE_LIBS) $(OPTIONAL_OPENSSL_LIBS) $(PTHREAD_LIBS)
+ if WIN32
+ OPENSC_PKCS11_LIBS += -lshlwapi
+diff --git a/src/smm/Makefile.am b/src/smm/Makefile.am
+index 873335fc6..98826a00f 100644
+--- a/src/smm/Makefile.am
++++ b/src/smm/Makefile.am
+@@ -7,8 +7,7 @@ EXTRA_DIST = Makefile.mak
+ AM_CFLAGS = $(OPTIONAL_OPENSSL_CFLAGS) $(OPTIONAL_READLINE_CFLAGS)
+ AM_CPPFLAGS = -I$(top_srcdir)/src -I$(top_srcdir)/src/common -I$(top_builddir)/src/include
+ LIBS = $(top_builddir)/src/sm/libsm.la \
+-	$(top_builddir)/src/libopensc/libopensc.la \
+-	$(top_builddir)/src/common/libcompat.la
++	$(top_builddir)/src/libopensc/libopensc.la
+ 
+ if ENABLE_OPENSSL
+ if ENABLE_SHARED
+diff --git a/src/tools/Makefile.am b/src/tools/Makefile.am
+index 6a447064f..d2d5120cc 100644
+--- a/src/tools/Makefile.am
++++ b/src/tools/Makefile.am
+@@ -46,9 +46,7 @@ endif
+ AM_CFLAGS = $(OPTIONAL_OPENSSL_CFLAGS) $(OPTIONAL_READLINE_CFLAGS)
+ AM_CPPFLAGS = -I$(top_srcdir)/src -D'DEFAULT_PKCS11_PROVIDER="$(DEFAULT_PKCS11_PROVIDER)"' -D'DEFAULT_ONEPIN_PKCS11_PROVIDER="$(DEFAULT_ONEPIN_PKCS11_PROVIDER)"'
+ LIBS = \
+-	$(top_builddir)/src/libopensc/libopensc.la \
+-	$(top_builddir)/src/common/libscdl.la \
+-	$(top_builddir)/src/common/libcompat.la
++	$(top_builddir)/src/libopensc/libopensc.la
+ 
+ sceac_example_SOURCES = sceac-example.c
+ sceac_example_LDADD = $(top_builddir)/src/libopensc/libopensc.la $(OPTIONAL_OPENSSL_LIBS) $(OPENPACE_LIBS)

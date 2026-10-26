@@ -1,0 +1,2 @@
+# Start lt-eidd on demand for every user.
+enable lt-eidd.socket

@@ -8,13 +8,14 @@ The proxy never touches the card; it forwards to `lt-eidd` over a unix socket.
 connection to the card, so PACE runs once and clients never fight over it.
 
     Firefox ─┐
-    Chrome  ─┼─ liblt_eid_pkcs11.so ── $XDG_RUNTIME_DIR/lt-eid/sock ──▶ lt-eidd ──▶ opensc-pkcs11.so ──▶ card
+    Chrome  ─┼─ lt-eid-pkcs11.so ──── $XDG_RUNTIME_DIR/lt-eid/sock ──▶ lt-eidd ──▶ opensc-pkcs11.so ──▶ card
     Autogram ┘
 
 ## Crates
 
 - `proto/`: requests, responses and framing (little-endian `u32` length + postcard).
-- `pkcs11/`: the proxy module, a `cdylib` built as `liblt_eid_pkcs11.so`.
+- `pkcs11/`: the proxy module, a `cdylib` built as `liblt_eid_pkcs11.so`
+  (installed as `lt-eid-pkcs11.so`).
 - `daemon/`: `lt-eidd`.
   - `card.rs` drives OpenSC through raw `C_*` calls (`cryptoki-sys`), so
     attribute bytes and `CK_RV` codes pass through unchanged.
@@ -86,7 +87,7 @@ from inside the desktop session so pinentry can open a window.
 ## Build and try
 
     cargo build --release
-    target/release/lt-eidd [path/to/opensc-pkcs11.so]   # default /opt/opensc/lib/opensc-pkcs11.so
+    target/release/lt-eidd [path/to/opensc-pkcs11.so]   # default /opt/lt-eid/lib/opensc-pkcs11.so
                                                         # (or let systemd start it, below)
 
     M=target/release/liblt_eid_pkcs11.so
@@ -116,6 +117,24 @@ a drop-in (`systemctl --user edit lt-eidd.service`):
 After rebuilding, `systemctl --user restart lt-eidd.service` (this logs the
 card out). Logs: `journalctl --user -u lt-eidd`. Started by hand while the
 socket unit is active, `lt-eidd` refuses to take over its socket.
+
+### RPM package
+
+`packaging/lt-eid.spec` builds one package with everything in `/opt/lt-eid`:
+
+    /opt/lt-eid/bin/lt-eidd
+    /opt/lt-eid/bin/{opensc-tool,pkcs11-tool,pkcs15-tool,opensc-explorer,lteid-tool}
+    /opt/lt-eid/lib/lt-eid-pkcs11.so       the module applications load
+    /opt/lt-eid/lib/opensc-pkcs11.so       private OpenSC, libopensc linked in
+    /opt/lt-eid/etc/opensc.conf            lteid driver only, exclusive card access
+
+plus the systemd user units (with a preset that enables the socket for every
+user) and a p11-kit registration of the module. The private OpenSC is the
+same snapshot as Fedora's, built with `packaging/opensc-static-libopensc.patch`
+so that it installs no `libopensc.so` and stays out of the system OpenSC's way.
+
+    packaging/make-sources.sh      # this tree, vendored crates, OpenSC patch
+    rpmbuild -bb packaging/lt-eid.spec
 
 ### Without a card
 

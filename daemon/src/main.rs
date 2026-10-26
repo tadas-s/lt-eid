@@ -31,7 +31,8 @@ use secrecy::ExposeSecret;
 use card::Card;
 use dialog::{Dialogs, Purpose};
 
-const DEFAULT_MODULE: &str = "/opt/opensc/lib/opensc-pkcs11.so";
+/// The private OpenSC build packaged with lt-eid.
+const DEFAULT_MODULE: &str = "/opt/lt-eid/lib/opensc-pkcs11.so";
 
 struct Daemon {
     card: Mutex<Card>,

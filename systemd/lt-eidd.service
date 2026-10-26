@@ -5,5 +5,5 @@ Requires=lt-eidd.socket
 After=lt-eidd.socket
 
 [Service]
-ExecStart=/usr/bin/lt-eidd
+ExecStart=/opt/lt-eid/bin/lt-eidd
 Restart=on-failure

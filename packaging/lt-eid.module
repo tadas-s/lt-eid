@@ -1,0 +1,3 @@
+# Lithuanian eID through lt-eidd. The module talks to the daemon only; it
+# never opens the card itself.
+module: /opt/lt-eid/lib/lt-eid-pkcs11.so
