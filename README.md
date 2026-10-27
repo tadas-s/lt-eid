@@ -21,6 +21,8 @@ connection to the card, so PACE runs once and clients never fight over it.
     attribute bytes and `CK_RV` codes pass through unchanged.
   - `dialog.rs` shows PIN and approval dialogs through pinentry.
   - `main.rs` serves clients and decides who may use which token.
+- `signing-server/`: `lt-eid-signing-server`, an Elpako Signer stand-in for
+  logging in to epaslaugos.lt. A client of the module like any other.
 
 ## Status
 
@@ -145,6 +147,7 @@ socket unit is active, `lt-eidd` refuses to take over its socket.
 `packaging/lt-eid.spec` builds one package with everything in `/opt/lt-eid`:
 
     /opt/lt-eid/bin/lt-eidd
+    /opt/lt-eid/bin/lt-eid-signing-server
     /opt/lt-eid/bin/{opensc-tool,pkcs11-tool,pkcs15-tool,opensc-explorer,lteid-tool}
     /opt/lt-eid/lib/lt-eid-pkcs11.so       the module applications load
     /opt/lt-eid/lib/opensc-pkcs11.so       private OpenSC, libopensc linked in

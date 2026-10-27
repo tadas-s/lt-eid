@@ -1,3 +1,5 @@
 # Run lt-eidd in every regular user's desktop session.
 enable lt-eidd.socket
 enable lt-eidd.service
+# The signing server starts on demand, through its socket.
+enable lt-eid-signing-server.socket

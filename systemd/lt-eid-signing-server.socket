@@ -1,0 +1,12 @@
+[Unit]
+Description=Lithuanian eID signing server socket (Elpako Signer)
+# Only in a regular user's desktop session, like lt-eidd.
+PartOf=graphical-session.target
+ConditionEnvironment=XDG_SESSION_CLASS=user
+
+[Socket]
+# Where Elpako-based sites (epaslaugos.lt) look for Elpako Signer.
+ListenStream=127.0.0.1:38888
+
+[Install]
+WantedBy=graphical-session.target

@@ -11,11 +11,11 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        3%{?dist}
+Release:        5%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
-# Rust crates compiled in: Apache-2.0 (cryptoki-sys), ISC (libloading), MIT,
+# Rust crates compiled in: Apache-2.0 (cryptoki, cryptoki-sys, openssl), ISC (libloading), MIT,
 # MIT OR Apache-2.0, Unlicense OR MIT; cargo-licenses.txt has the tally.
 License:        LGPL-2.1-or-later AND BSD-3-Clause AND Apache-2.0 AND ISC AND MIT AND (MIT OR Apache-2.0) AND (Unlicense OR MIT)
 Source0:        %{name}-%{version}.tar.gz
@@ -54,6 +54,9 @@ Applications (browsers, signing tools) load a small PKCS#11 module that
 forwards to lt-eidd, a per-user daemon. The daemon owns the only connection
 to the Lithuanian eID card through a private OpenSC build, asks for PINs
 itself and lets applications use the card only with the user's approval.
+
+lt-eid-signing-server stands in for Elpako Signer, the local web service
+Elpako-based sites (epaslaugos.lt) use to log in with the eID.
 
 %prep
 %setup -q -a 1
@@ -108,11 +111,14 @@ rm -rf %{buildroot}%{_sysconfdir}/eac
 install -pm 0644 packaging/opensc.conf $r/etc/opensc.conf
 
 install -Dpm 0755 target/release/lt-eidd $r/bin/lt-eidd
+install -Dpm 0755 target/release/lt-eid-signing-server $r/bin/lt-eid-signing-server
 # Cargo names it lib<crate>.so; install it under the name it is known by.
 install -Dpm 0755 target/release/liblt_eid_pkcs11.so $r/lib/lt-eid-pkcs11.so
 
 install -Dpm 0644 systemd/lt-eidd.socket %{buildroot}%{_userunitdir}/lt-eidd.socket
 install -Dpm 0644 systemd/lt-eidd.service %{buildroot}%{_userunitdir}/lt-eidd.service
+install -Dpm 0644 systemd/lt-eid-signing-server.socket %{buildroot}%{_userunitdir}/lt-eid-signing-server.socket
+install -Dpm 0644 systemd/lt-eid-signing-server.service %{buildroot}%{_userunitdir}/lt-eid-signing-server.service
 install -Dpm 0644 packaging/80-lt-eid.preset %{buildroot}%{_userpresetdir}/80-lt-eid.preset
 install -Dpm 0644 packaging/lt-eid.module %{buildroot}%{_datadir}/p11-kit/modules/lt-eid.module
 
@@ -120,10 +126,10 @@ cp -p opensc/COPYING COPYING.opensc
 cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-licenses.txt
 
 %post
-%systemd_user_post lt-eidd.socket lt-eidd.service
+%systemd_user_post lt-eidd.socket lt-eidd.service lt-eid-signing-server.socket lt-eid-signing-server.service
 
 %preun
-%systemd_user_preun lt-eidd.socket lt-eidd.service
+%systemd_user_preun lt-eidd.socket lt-eidd.service lt-eid-signing-server.socket lt-eid-signing-server.service
 
 %files
 %license LICENSE COPYING.opensc cargo-licenses.txt
@@ -133,6 +139,7 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %dir %{ltdir}/lib
 %dir %{ltdir}/etc
 %{ltdir}/bin/lt-eidd
+%{ltdir}/bin/lt-eid-signing-server
 %{ltdir}/bin/opensc-tool
 %{ltdir}/bin/opensc-explorer
 %{ltdir}/bin/pkcs11-tool
@@ -144,10 +151,19 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{ltdir}/share
 %{_userunitdir}/lt-eidd.socket
 %{_userunitdir}/lt-eidd.service
+%{_userunitdir}/lt-eid-signing-server.socket
+%{_userunitdir}/lt-eid-signing-server.service
 %{_userpresetdir}/80-lt-eid.preset
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Tue Oct 27 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-5
+- Start lt-eid-signing-server only through its socket, not at login
+
+* Tue Oct 27 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-4
+- Add lt-eid-signing-server, the Elpako Signer stand-in from lithuanian-eid,
+  ported to Rust and using the card through the lt-eid PKCS#11 module
+
 * Mon Oct 26 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-3
 - License lt-eid under LGPL-2.1-or-later, like OpenSC
 

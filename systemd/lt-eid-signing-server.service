@@ -1,0 +1,16 @@
+[Unit]
+Description=Lithuanian eID signing server (Elpako Signer)
+# Started by its socket when a site first calls it, in a regular user's
+# desktop session only, like lt-eidd.
+Requires=lt-eid-signing-server.socket
+After=lt-eid-signing-server.socket graphical-session.target
+BindsTo=graphical-session.target
+ConditionEnvironment=XDG_SESSION_CLASS=user
+
+[Service]
+ExecStart=/opt/lt-eid/bin/lt-eid-signing-server
+Restart=on-failure
+
+[Install]
+# Started only through its socket: enabling the service enables that.
+Also=lt-eid-signing-server.socket

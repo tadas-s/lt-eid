@@ -189,6 +189,7 @@ fn display_name(app: &str) -> &str {
         "autogram" | "Autogram" => "Autogram",
         "evolution" => "Evolution",
         "soffice.bin" => "LibreOffice",
+        "lt-eid-signing-server" => "epaslaugos.lt authenticator",
         app => app,
     }
 }
