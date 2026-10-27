@@ -35,14 +35,13 @@ BuildRequires:  pcsc-lite-devel
 BuildRequires:  openssl-devel
 BuildRequires:  readline-devel
 BuildRequires:  zlib-ng-devel
-BuildRequires:  openpace-devel >= 1.1.4
+BuildRequires:  openpace-devel >= 1.1.3
 BuildRequires:  systemd-rpm-macros
 
 # OpenSC loads libpcsclite with dlopen(), so no automatic dependency.
 Requires:       pcsc-lite
 Requires:       pcsc-lite-libs%{?_isa}
-# The version tested with the lteid driver.
-Requires:       openpace%{?_isa} >= 1.1.4
+Requires:       openpace%{?_isa} >= 1.1.3
 Requires:       pinentry
 Recommends:     pinentry-gnome3
 Requires:       p11-kit
