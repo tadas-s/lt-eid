@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        5%{?dist}
+Release:        6%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -156,6 +156,9 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Wed Oct 28 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-6
+- Log lt-eidd clients, dialogs and their outcomes, logins and signatures
+
 * Tue Oct 27 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-5
 - Start lt-eid-signing-server only through its socket, not at login
 

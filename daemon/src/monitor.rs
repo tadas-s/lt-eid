@@ -50,6 +50,7 @@ fn watch_until_error(inserted: &mut impl FnMut(&str)) -> Result<(), Error> {
     let ctx = Context::establish(Scope::User)?;
     // The PnP entry wakes us when readers are plugged in or out.
     let mut states = vec![ReaderState::new(PNP_NOTIFICATION(), State::UNAWARE)];
+    let mut had_readers = true;
     loop {
         states.retain(|rs| !rs.event_state().intersects(State::UNKNOWN | State::IGNORE));
         let names = match ctx.list_readers_owned() {
@@ -57,8 +58,13 @@ fn watch_until_error(inserted: &mut impl FnMut(&str)) -> Result<(), Error> {
             Err(Error::NoReadersAvailable) => Vec::new(),
             Err(e) => return Err(e),
         };
+        if had_readers && names.is_empty() {
+            eprintln!("no card readers");
+        }
+        had_readers = !names.is_empty();
         for name in names {
             if !states.iter().any(|rs| rs.name() == name.as_c_str()) {
+                eprintln!("reader {:?} found", name.to_string_lossy());
                 states.push(ReaderState::new(name, State::UNAWARE));
             }
         }
@@ -69,12 +75,40 @@ fn watch_until_error(inserted: &mut impl FnMut(&str)) -> Result<(), Error> {
         ctx.get_status_change(None, &mut states)?;
 
         for rs in &states {
-            let card_arrived = rs.event_state().contains(State::PRESENT) && !rs.current_state().contains(State::PRESENT);
-            if rs.name() != PNP_NOTIFICATION() && card_arrived && is_lteid(rs.atr()) {
-                inserted(&rs.name().to_string_lossy());
+            if rs.name() == PNP_NOTIFICATION() {
+                continue;
+            }
+            let reader = rs.name().to_string_lossy();
+            let (now, before) = (rs.event_state(), rs.current_state());
+            if now.intersects(State::UNKNOWN | State::IGNORE) {
+                eprintln!("reader {reader:?} gone");
+            } else if now.contains(State::PRESENT) && !before.contains(State::PRESENT) {
+                let atr = rs.atr();
+                let lteid = is_lteid(atr);
+                let what = if lteid { "Lithuanian eID" } else { "not a Lithuanian eID" };
+                eprintln!("{reader}: card inserted, ATR {}: {what}{}", hex(atr), flags(now));
+                if lteid {
+                    inserted(&reader);
+                }
+            } else if before.contains(State::PRESENT) && !now.contains(State::PRESENT) {
+                eprintln!("{reader}: card removed");
             }
         }
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(":")
+}
+
+/// Reader states worth knowing about when a card won't work, e.g. one
+/// another program holds exclusively, or one that doesn't answer.
+fn flags(state: State) -> String {
+    [(State::EXCLUSIVE, "exclusive"), (State::INUSE, "in use"), (State::MUTE, "mute"), (State::UNPOWERED, "unpowered")]
+        .into_iter()
+        .filter(|&(flag, _)| state.contains(flag))
+        .map(|(_, name)| format!(" ({name})"))
+        .collect()
 }
 
 #[cfg(test)]

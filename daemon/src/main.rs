@@ -21,14 +21,17 @@ mod dialog;
 mod monitor;
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fs;
 use std::io;
-use std::os::fd::FromRawFd;
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
+use std::time::Instant;
 
 use cryptoki_sys::*;
 use lt_eid_proto::{Attr, PROTO_VERSION, Request, Response, Role, Token, read_frame, write_frame};
@@ -51,10 +54,98 @@ struct Daemon {
 
 /// One connected application.
 struct Client {
+    peer: Peer,
     app: String,
     /// Tokens this client may use, keyed by slot, with the login they
     /// approved (see `Card::login_id`).
     grants: HashMap<CK_SLOT_ID, u64>,
+}
+
+impl fmt::Display for Client {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // The module's name for the program differs for Java programs.
+        if self.app == self.peer.comm {
+            write!(f, "{}", self.peer)
+        } else {
+            write!(f, "{} {:?}", self.peer, self.app)
+        }
+    }
+}
+
+/// The process at the other end of a connection, for the log.
+struct Peer {
+    /// Numbers connections in the order they came, to tell apart log lines
+    /// of several connections from one process.
+    id: u64,
+    pid: Option<libc::pid_t>,
+    /// The process's own idea of its name (`/proc/<pid>/comm`).
+    comm: String,
+}
+
+impl Peer {
+    fn of(stream: &UnixStream) -> Self {
+        static LAST: AtomicU64 = AtomicU64::new(0);
+        let id = LAST.fetch_add(1, Ordering::Relaxed) + 1;
+        let pid = peer_pid(stream);
+        let comm = pid
+            .and_then(|pid| fs::read_to_string(format!("/proc/{pid}/comm")).ok())
+            .map(|comm| comm.trim_end().to_owned())
+            .unwrap_or_else(|| "?".to_owned());
+        Peer { id, pid, comm }
+    }
+}
+
+impl fmt::Display for Peer {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self.pid {
+            Some(pid) => write!(f, "#{} {}[{pid}]", self.id, self.comm),
+            None => write!(f, "#{} pid unknown", self.id),
+        }
+    }
+}
+
+/// The PID of the process that connected, as the kernel recorded it.
+fn peer_pid(stream: &UnixStream) -> Option<libc::pid_t> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = size_of::<libc::ucred>() as libc::socklen_t;
+    let rv = unsafe {
+        libc::getsockopt(stream.as_raw_fd(), libc::SOL_SOCKET, libc::SO_PEERCRED, (&raw mut cred).cast(), &mut len)
+    };
+    (rv == 0 && cred.pid > 0).then_some(cred.pid)
+}
+
+/// How a dialog ended, for the log. A cancel right at the timeout most
+/// likely means the user never saw the dialog.
+fn outcome<T>(result: &Result<T, CK_RV>, shown: Instant) -> String {
+    let secs = shown.elapsed().as_secs_f32();
+    match result {
+        Ok(_) => format!("answered after {secs:.1}s"),
+        Err(CKR_FUNCTION_CANCELED) => format!("cancelled or timed out after {secs:.1}s"),
+        Err(rv) => format!("failed after {secs:.1}s: {}", rv_name(*rv)),
+    }
+}
+
+/// A `CK_RV` for the log.
+fn rv_name(rv: CK_RV) -> String {
+    let name = match rv {
+        CKR_OK => "CKR_OK",
+        CKR_FUNCTION_CANCELED => "CKR_FUNCTION_CANCELED",
+        CKR_FUNCTION_REJECTED => "CKR_FUNCTION_REJECTED",
+        CKR_FUNCTION_FAILED => "CKR_FUNCTION_FAILED",
+        CKR_GENERAL_ERROR => "CKR_GENERAL_ERROR",
+        CKR_DEVICE_ERROR => "CKR_DEVICE_ERROR",
+        CKR_DEVICE_REMOVED => "CKR_DEVICE_REMOVED",
+        CKR_TOKEN_NOT_PRESENT => "CKR_TOKEN_NOT_PRESENT",
+        CKR_TOKEN_NOT_RECOGNIZED => "CKR_TOKEN_NOT_RECOGNIZED",
+        CKR_PIN_INCORRECT => "CKR_PIN_INCORRECT",
+        CKR_PIN_LOCKED => "CKR_PIN_LOCKED",
+        CKR_USER_NOT_LOGGED_IN => "CKR_USER_NOT_LOGGED_IN",
+        CKR_SESSION_HANDLE_INVALID => "CKR_SESSION_HANDLE_INVALID",
+        CKR_KEY_HANDLE_INVALID => "CKR_KEY_HANDLE_INVALID",
+        CKR_MECHANISM_INVALID => "CKR_MECHANISM_INVALID",
+        _ => return format!("{rv:#x}"),
+    };
+    name.to_owned()
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -77,10 +168,21 @@ impl Daemon {
         let login = match current {
             Some(id) if client.grants.get(&slot) == Some(&id) => id,
             Some(id) => {
-                self.dialogs.approve(&client.app, &token, Purpose::Login)?;
+                eprintln!("{client}: asking to approve login to {:?}", token.label);
+                let shown = Instant::now();
+                let approved = self.dialogs.approve(&client.app, &token, Purpose::Login);
+                eprintln!("{client}: login approval {}", outcome(&approved, shown));
+                approved?;
                 id
             }
-            None => self.with_pin(&client.app, token, Purpose::Login, |card, pin| card.login(slot, pin))?,
+            None => {
+                let result = self.with_pin(client, token, Purpose::Login, |card, pin| card.login(slot, pin));
+                match &result {
+                    Ok(_) => eprintln!("{client}: logged in to slot {slot}"),
+                    Err(rv) => eprintln!("{client}: login to slot {slot} failed: {}", rv_name(*rv)),
+                }
+                result?
+            }
         };
         client.grants.insert(slot, login);
         Ok(())
@@ -99,22 +201,29 @@ impl Daemon {
             return lock(&self.card).sign(slot, key, mechanism, data, None);
         }
         let _dialog = lock(&self.dialog);
-        if always_authenticate {
-            return self.with_pin(&client.app, token, Purpose::Sign, |card, pin| {
-                card.sign(slot, key, mechanism, data, Some(pin))
-            });
+        let result = if always_authenticate {
+            self.with_pin(client, token, Purpose::Sign, |card, pin| card.sign(slot, key, mechanism, data, Some(pin)))
+        } else {
+            // The card doesn't want PIN.QES again; still, no qualified
+            // signature without the user saying so.
+            eprintln!("{client}: asking to approve a signature with {:?}", token.label);
+            let shown = Instant::now();
+            let approved = self.dialogs.approve(&client.app, &token, Purpose::Sign);
+            eprintln!("{client}: signature approval {}", outcome(&approved, shown));
+            approved.and_then(|()| lock(&self.card).sign(slot, key, mechanism, data, None))
+        };
+        match &result {
+            Ok(_) => eprintln!("{client}: signed with slot {slot}"),
+            Err(rv) => eprintln!("{client}: signing with slot {slot} failed: {}", rv_name(*rv)),
         }
-        // The card doesn't want PIN.QES again; still, no qualified signature
-        // without the user saying so.
-        self.dialogs.approve(&client.app, &token, Purpose::Sign)?;
-        lock(&self.card).sign(slot, key, mechanism, data, None)
+        result
     }
 
     /// Ask for the PIN and run `attempt` with it, until the card accepts it
     /// or the user gives up.
     fn with_pin<T>(
         &self,
-        app: &str,
+        client: &Client,
         mut token: Token,
         purpose: Purpose,
         mut attempt: impl FnMut(&mut Card, &[u8]) -> Result<T, CK_RV>,
@@ -122,19 +231,31 @@ impl Daemon {
         let mut error = None;
         loop {
             if token.flags & CKF_USER_PIN_LOCKED != 0 {
+                eprintln!("{client}: PIN of {:?} is blocked", token.label);
                 return Err(CKR_PIN_LOCKED);
             }
-            let pin = self.dialogs.pin(app, &token, purpose, error.as_deref())?;
+            let retries = match token.flags {
+                f if f & CKF_USER_PIN_FINAL_TRY != 0 => ", final try",
+                f if f & CKF_USER_PIN_COUNT_LOW != 0 => ", earlier attempt wrong",
+                _ => "",
+            };
+            eprintln!("{client}: asking for the PIN of {:?}{retries}", token.label);
+            let shown = Instant::now();
+            let pin = self.dialogs.pin(&client.app, &token, purpose, error.as_deref());
+            eprintln!("{client}: PIN dialog {}", outcome(&pin, shown));
+            let pin = pin?;
             let pin = pin.expose_secret().as_bytes();
             // Don't spend a card attempt on a PIN that can't be right.
             let len = pin.len() as u64;
             if len < token.min_pin_len || len > token.max_pin_len {
+                eprintln!("{client}: PIN of the wrong length, not trying it on the card");
                 error = Some(format!("The PIN has {} to {} digits.", token.min_pin_len, token.max_pin_len));
                 continue;
             }
             let mut card = lock(&self.card);
             match attempt(&mut card, pin) {
                 Err(CKR_PIN_INCORRECT) => {
+                    eprintln!("{client}: wrong PIN");
                     error = Some("Wrong PIN.".to_owned());
                     // Refresh the retry-counter flags for the next dialog.
                     token = card.token(token.slot)?;
@@ -167,12 +288,15 @@ impl Daemon {
         eprintln!("{reader}: card needs its CAN");
         let mut error = None;
         loop {
-            let Ok(can) = self.dialogs.can(error.as_deref()) else {
-                eprintln!("{reader}: no CAN entered");
+            let shown = Instant::now();
+            let can = self.dialogs.can(error.as_deref());
+            eprintln!("{reader}: CAN dialog {}", outcome(&can, shown));
+            let Ok(can) = can else {
                 return;
             };
             let can = can.expose_secret();
             if can.len() != 6 || !can.bytes().all(|b| b.is_ascii_digit()) {
+                eprintln!("{reader}: CAN is not 6 digits");
                 error = Some("The CAN has 6 digits.".to_owned());
                 continue;
             }
@@ -186,7 +310,10 @@ impl Daemon {
                     eprintln!("{reader}: CAN stored, but OpenSC still can't open the card");
                     return;
                 }
-                Err(CanError::Wrong) => error = Some("Wrong CAN. Check the number on the card.".to_owned()),
+                Err(CanError::Wrong) => {
+                    eprintln!("{reader}: wrong CAN");
+                    error = Some("Wrong CAN. Check the number on the card.".to_owned());
+                }
                 Err(CanError::Failed(why)) => {
                     eprintln!("{reader}: storing the CAN failed: {why}");
                     return;
@@ -213,7 +340,9 @@ impl Daemon {
             }
             Request::Login { slot } => self.login(client, slot).map(|()| Response::Ok),
             Request::Logout { slot } => {
-                client.grants.remove(&slot);
+                if client.grants.remove(&slot).is_some() {
+                    eprintln!("{client}: logged out of slot {slot}");
+                }
                 Ok(Response::Ok)
             }
             Request::Mechanisms { slot } => lock(&self.card).mechanisms(slot).map(Response::Mechanisms),
@@ -226,32 +355,46 @@ impl Daemon {
     }
 }
 
-fn serve(daemon: &Daemon, mut stream: UnixStream) -> io::Result<()> {
+fn serve(daemon: &Daemon, mut stream: UnixStream) {
+    let peer = Peer::of(&stream);
     let hello = match read_frame(&mut stream) {
         Ok(hello) => hello,
         // Connected and left, e.g. a check whether we are up.
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-        Err(e) => return Err(e),
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return,
+        Err(e) => {
+            eprintln!("{peer}: handshake: {e}");
+            return;
+        }
     };
     let mut client = match hello {
-        Request::Hello { proto: PROTO_VERSION, app } => {
-            write_frame(&mut stream, &Response::Hello { proto: PROTO_VERSION })?;
-            Client { app, grants: HashMap::new() }
+        Request::Hello { proto: PROTO_VERSION, app } => Client { peer, app, grants: HashMap::new() },
+        Request::Hello { proto, app } => {
+            eprintln!("{peer} {app:?}: protocol version {proto}, we speak {PROTO_VERSION}; module and daemon don't match");
+            return;
         }
         other => {
-            eprintln!("bad handshake: {other:?}");
-            return Ok(());
+            eprintln!("{peer}: bad handshake: {other:?}");
+            return;
         }
     };
-    loop {
+    if let Err(e) = write_frame(&mut stream, &Response::Hello { proto: PROTO_VERSION }) {
+        eprintln!("{client}: handshake: {e}");
+        return;
+    }
+    eprintln!("{client}: connected");
+    let connected = Instant::now();
+    let ended = loop {
         let req = match read_frame(&mut stream) {
             Ok(req) => req,
-            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-            Err(e) => return Err(e),
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break "disconnected".to_owned(),
+            Err(e) => break format!("connection failed: {e}"),
         };
         let resp = daemon.handle(&mut client, req).unwrap_or_else(Response::Rv);
-        write_frame(&mut stream, &resp)?;
-    }
+        if let Err(e) = write_frame(&mut stream, &resp) {
+            break format!("connection failed: {e}");
+        }
+    };
+    eprintln!("{client}: {ended} after {:.0}s", connected.elapsed().as_secs_f32());
 }
 
 /// The listening socket systemd passed us (socket activation), if any.
@@ -358,10 +501,6 @@ fn main() {
             }
         };
         let daemon = Arc::clone(&daemon);
-        thread::spawn(move || {
-            if let Err(e) = serve(&daemon, stream) {
-                eprintln!("client: {e}");
-            }
-        });
+        thread::spawn(move || serve(&daemon, stream));
     }
 }
