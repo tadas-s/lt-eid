@@ -67,6 +67,13 @@ pub struct Card {
     /// verified even right after a successful login.
     logins: HashMap<CK_SLOT_ID, u64>,
     last_login: u64,
+    /// The tokens as last read, while a card is in. OpenSC asks the card for
+    /// the PIN retry counters on every `C_GetTokenInfo`, which takes tens of
+    /// milliseconds per token, and clients ask for the tokens all the time.
+    /// The card is read-only, and we hold it exclusively, so the tokens only
+    /// change when the card goes or comes (see `forget_tokens`), or with a
+    /// PIN attempt.
+    tokens: Option<Vec<Token>>,
 }
 
 impl Card {
@@ -81,6 +88,7 @@ impl Card {
             sessions: HashMap::new(),
             logins: HashMap::new(),
             last_login: 0,
+            tokens: None,
         })
     }
 
@@ -101,6 +109,13 @@ impl Card {
         }
         self.sessions.clear();
         self.logins.clear();
+        self.tokens = None;
+    }
+
+    /// Read the tokens from the card again next time: a card was inserted
+    /// or removed, or a reader came or went.
+    pub fn forget_tokens(&mut self) {
+        self.tokens = None;
     }
 
     /// Check `can` on the card and store it for the lteid driver, using
@@ -133,6 +148,9 @@ impl Card {
     }
 
     pub fn tokens(&mut self) -> Result<Vec<Token>, CK_RV> {
+        if let Some(tokens) = &self.tokens {
+            return Ok(tokens.clone());
+        }
         self.ready()?;
         let mut count: CK_ULONG = 0;
         check(unsafe { self.p11.C_GetSlotList(CK_TRUE, null_mut(), &mut count) })?;
@@ -170,6 +188,11 @@ impl Card {
                 max_pin_len: info.ulMaxPinLen,
             });
         }
+        // Not without tokens: then the card may only be waiting for its CAN,
+        // or for another program to let go of it, and no event tells us.
+        if !tokens.is_empty() {
+            self.tokens = Some(tokens.clone());
+        }
         Ok(tokens)
     }
 
@@ -202,10 +225,14 @@ impl Card {
                 Err(CKR_SESSION_HANDLE_INVALID | CKR_SESSION_CLOSED) => {
                     self.sessions.remove(&slot);
                     self.logins.remove(&slot);
+                    self.tokens = None;
                 }
                 result => {
                     if let Err(CKR_USER_NOT_LOGGED_IN | CKR_DEVICE_REMOVED | CKR_TOKEN_NOT_PRESENT) = result {
                         self.logins.remove(&slot);
+                    }
+                    if let Err(CKR_DEVICE_REMOVED | CKR_TOKEN_NOT_PRESENT) = result {
+                        self.tokens = None;
                     }
                     return result;
                 }
@@ -241,6 +268,8 @@ impl Card {
     /// There is deliberately no logout: the lteid driver tears down the PACE
     /// channel on logout, which would log out every token on the card.
     pub fn login(&mut self, slot: CK_SLOT_ID, pin: &[u8]) -> Result<u64, CK_RV> {
+        // Right or wrong, the PIN changes the retry counters.
+        self.tokens = None;
         self.with_session(slot, |p11, session| {
             // OpenSC only reads the PIN, the `*mut` is a C API wart.
             let (pin, len) = (pin.as_ptr() as *mut _, pin.len() as CK_ULONG);
@@ -296,6 +325,10 @@ impl Card {
         data: &[u8],
         pin: Option<&[u8]>,
     ) -> Result<Vec<u8>, CK_RV> {
+        if pin.is_some() {
+            // Right or wrong, the PIN changes the retry counters.
+            self.tokens = None;
+        }
         let mut started = false;
         let result = self.with_session(slot, |p11, session| unsafe {
             let mut mechanism = CK_MECHANISM { mechanism, pParameter: null_mut(), ulParameterLen: 0 };

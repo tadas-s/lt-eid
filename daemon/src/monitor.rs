@@ -34,19 +34,22 @@ pub fn held_by_another(reader: &str) -> bool {
     matches!(ctx.connect(&reader, ShareMode::Exclusive, Protocols::ANY), Err(Error::SharingViolation))
 }
 
-/// Call `inserted` with the reader's name whenever a Lithuanian eID is
-/// inserted, and once for each one already in a reader. Never returns; if
-/// pcscd goes away, starts over once it is back.
-pub fn watch(mut inserted: impl FnMut(&str)) -> ! {
+/// Call `changed` whenever a card or reader comes or goes, and right away.
+/// Then, after `changed`, call `inserted` with the reader's name whenever a
+/// Lithuanian eID is inserted, and once for each one already in a reader.
+/// Never returns; if pcscd goes away, starts over once it is back.
+pub fn watch(mut changed: impl FnMut(), mut inserted: impl FnMut(&str)) -> ! {
     loop {
-        if let Err(e) = watch_until_error(&mut inserted) {
+        // Cards may have come or gone while we weren't watching.
+        changed();
+        if let Err(e) = watch_until_error(&mut changed, &mut inserted) {
             eprintln!("card monitor: {e}");
         }
         std::thread::sleep(Duration::from_secs(5));
     }
 }
 
-fn watch_until_error(inserted: &mut impl FnMut(&str)) -> Result<(), Error> {
+fn watch_until_error(changed: &mut impl FnMut(), inserted: &mut impl FnMut(&str)) -> Result<(), Error> {
     let ctx = Context::establish(Scope::User)?;
     // The PnP entry wakes us when readers are plugged in or out.
     let mut states = vec![ReaderState::new(PNP_NOTIFICATION(), State::UNAWARE)];
@@ -82,7 +85,9 @@ fn watch_until_error(inserted: &mut impl FnMut(&str)) -> Result<(), Error> {
             let (now, before) = (rs.event_state(), rs.current_state());
             if now.intersects(State::UNKNOWN | State::IGNORE) {
                 eprintln!("reader {reader:?} gone");
+                changed();
             } else if now.contains(State::PRESENT) && !before.contains(State::PRESENT) {
+                changed();
                 let atr = rs.atr();
                 let lteid = is_lteid(atr);
                 let what = if lteid { "Lithuanian eID" } else { "not a Lithuanian eID" };
@@ -92,6 +97,7 @@ fn watch_until_error(inserted: &mut impl FnMut(&str)) -> Result<(), Error> {
                 }
             } else if before.contains(State::PRESENT) && !now.contains(State::PRESENT) {
                 eprintln!("{reader}: card removed");
+                changed();
             }
         }
     }

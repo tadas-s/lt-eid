@@ -462,12 +462,15 @@ fn main() {
     });
     let watched = Arc::clone(&daemon);
     thread::spawn(move || {
-        monitor::watch(|reader| {
-            let daemon = Arc::clone(&watched);
-            let reader = reader.to_owned();
-            // Off the monitor thread: the CAN dialog can take minutes.
-            thread::spawn(move || daemon.card_inserted(&reader));
-        })
+        monitor::watch(
+            || lock(&watched.card).forget_tokens(),
+            |reader| {
+                let daemon = Arc::clone(&watched);
+                let reader = reader.to_owned();
+                // Off the monitor thread: the CAN dialog can take minutes.
+                thread::spawn(move || daemon.card_inserted(&reader));
+            },
+        )
     });
 
     let listener = match activated {

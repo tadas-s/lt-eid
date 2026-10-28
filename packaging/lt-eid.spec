@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        6%{?dist}
+Release:        7%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -156,6 +156,10 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Wed Oct 28 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-7
+- Cache the token list in lt-eidd: OpenSC reads the PIN retry counters from
+  the card for every token query, which made listing tokens take seconds
+
 * Wed Oct 28 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-6
 - Log lt-eidd clients, dialogs and their outcomes, logins and signatures
 
