@@ -7,7 +7,9 @@
 //! interleave on the card.
 //!
 //! Clients never see a PIN. The first client to log in to a token makes the
-//! daemon ask for the PIN; later clients only need the user's approval.
+//! daemon ask for the PIN; later clients only need the user's approval. With
+//! a PIN pad reader, the reader asks for the PIN and the daemon only shows a
+//! notification pointing there.
 //! Signing with the authentication key needs nothing more. A qualified
 //! signature always needs the user: PIN.QES if the card wants it for every
 //! signature, otherwise an approval.
@@ -37,7 +39,7 @@ use cryptoki_sys::*;
 use lt_eid_proto::{Attr, PROTO_VERSION, Request, Response, Role, Token, read_frame, write_frame};
 use secrecy::ExposeSecret;
 
-use card::{Card, CanError};
+use card::{Card, CanError, Pin};
 use dialog::{Dialogs, Purpose};
 
 /// The private OpenSC build packaged with lt-eid.
@@ -125,6 +127,15 @@ fn outcome<T>(result: &Result<T, CK_RV>, shown: Instant) -> String {
     }
 }
 
+/// The PIN retry state of `token`, for the log.
+fn retries(token: &Token) -> &'static str {
+    match token.flags {
+        f if f & CKF_USER_PIN_FINAL_TRY != 0 => ", final try",
+        f if f & CKF_USER_PIN_COUNT_LOW != 0 => ", earlier attempt wrong",
+        _ => "",
+    }
+}
+
 /// A `CK_RV` for the log.
 fn rv_name(rv: CK_RV) -> String {
     let name = match rv {
@@ -143,6 +154,7 @@ fn rv_name(rv: CK_RV) -> String {
         CKR_SESSION_HANDLE_INVALID => "CKR_SESSION_HANDLE_INVALID",
         CKR_KEY_HANDLE_INVALID => "CKR_KEY_HANDLE_INVALID",
         CKR_MECHANISM_INVALID => "CKR_MECHANISM_INVALID",
+        CKR_FUNCTION_NOT_SUPPORTED => "CKR_FUNCTION_NOT_SUPPORTED",
         _ => return format!("{rv:#x}"),
     };
     name.to_owned()
@@ -220,26 +232,31 @@ impl Daemon {
     }
 
     /// Ask for the PIN and run `attempt` with it, until the card accepts it
-    /// or the user gives up.
+    /// or the user gives up. With a PIN pad reader, the reader asks.
     fn with_pin<T>(
         &self,
         client: &Client,
         mut token: Token,
         purpose: Purpose,
-        mut attempt: impl FnMut(&mut Card, &[u8]) -> Result<T, CK_RV>,
+        mut attempt: impl FnMut(&mut Card, Pin) -> Result<T, CK_RV>,
     ) -> Result<T, CK_RV> {
+        if token.flags & CKF_PROTECTED_AUTHENTICATION_PATH != 0 {
+            match self.with_reader_pin(client, &mut token, purpose, &mut attempt) {
+                // A PIN pad reader that can't do PACE: it can't take the
+                // eID PIN, which unlocks the card through PACE.
+                Err(CKR_FUNCTION_NOT_SUPPORTED) => {
+                    eprintln!("{client}: the reader can't ask for the PIN of {:?}", token.label)
+                }
+                result => return result,
+            }
+        }
         let mut error = None;
         loop {
             if token.flags & CKF_USER_PIN_LOCKED != 0 {
                 eprintln!("{client}: PIN of {:?} is blocked", token.label);
                 return Err(CKR_PIN_LOCKED);
             }
-            let retries = match token.flags {
-                f if f & CKF_USER_PIN_FINAL_TRY != 0 => ", final try",
-                f if f & CKF_USER_PIN_COUNT_LOW != 0 => ", earlier attempt wrong",
-                _ => "",
-            };
-            eprintln!("{client}: asking for the PIN of {:?}{retries}", token.label);
+            eprintln!("{client}: asking for the PIN of {:?}{}", token.label, retries(&token));
             let shown = Instant::now();
             let pin = self.dialogs.pin(&client.app, &token, purpose, error.as_deref());
             eprintln!("{client}: PIN dialog {}", outcome(&pin, shown));
@@ -253,12 +270,48 @@ impl Daemon {
                 continue;
             }
             let mut card = lock(&self.card);
-            match attempt(&mut card, pin) {
+            match attempt(&mut card, Pin::Typed(pin)) {
                 Err(CKR_PIN_INCORRECT) => {
                     eprintln!("{client}: wrong PIN");
                     error = Some("Wrong PIN.".to_owned());
                     // Refresh the retry-counter flags for the next dialog.
                     token = card.token(token.slot)?;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    /// `with_pin` for a PIN pad reader: run `attempt` with the reader
+    /// asking for the PIN, a notification telling the user so, until the
+    /// card accepts a PIN or the user cancels on the reader. Card access
+    /// stays locked meanwhile: the reader is busy anyway.
+    fn with_reader_pin<T>(
+        &self,
+        client: &Client,
+        token: &mut Token,
+        purpose: Purpose,
+        attempt: &mut impl FnMut(&mut Card, Pin) -> Result<T, CK_RV>,
+    ) -> Result<T, CK_RV> {
+        let mut error = None;
+        loop {
+            if token.flags & CKF_USER_PIN_LOCKED != 0 {
+                eprintln!("{client}: PIN of {:?} is blocked", token.label);
+                return Err(CKR_PIN_LOCKED);
+            }
+            eprintln!("{client}: asking for the PIN of {:?} on the reader{}", token.label, retries(token));
+            let shown = Instant::now();
+            let mut card = lock(&self.card);
+            let result = {
+                let _notice = self.dialogs.reader_pin(&client.app, token, purpose, error);
+                attempt(&mut card, Pin::Reader)
+            };
+            eprintln!("{client}: PIN entry on the reader {}", outcome(&result, shown));
+            match result {
+                Err(CKR_PIN_INCORRECT) => {
+                    error = Some("Wrong PIN.");
+                    // Refresh the retry-counter flags for the next try.
+                    *token = card.token(token.slot)?;
                 }
                 result => return result,
             }

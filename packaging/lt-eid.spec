@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        8%{?dist}
+Release:        9%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -47,6 +47,8 @@ Requires:       pcsc-lite-libs%{?_isa}
 Requires:       openpace%{?_isa} >= 1.1.3
 Requires:       pinentry
 Recommends:     pinentry-gnome3
+# gdbus, for the notification while a PIN pad reader asks for the PIN.
+Requires:       glib2
 Requires:       p11-kit
 
 Provides:       bundled(opensc) = %{opensc_version}
@@ -160,6 +162,10 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Fri Oct 30 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-9
+- With a PIN pad reader, let the reader ask for PINs and show a notification
+  pointing there; fall back to the PIN dialog where the reader can't do it
+
 * Fri Oct 30 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-8
 - Bundled OpenSC: support PACE capable pin pad readers in the lteid driver
 

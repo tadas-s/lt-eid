@@ -19,7 +19,8 @@ connection to the card, so PACE runs once and clients never fight over it.
 - `daemon/`: `lt-eidd`.
   - `card.rs` drives OpenSC through raw `C_*` calls (`cryptoki-sys`), so
     attribute bytes and `CK_RV` codes pass through unchanged.
-  - `dialog.rs` shows PIN and approval dialogs through pinentry.
+  - `dialog.rs` shows PIN and approval dialogs through pinentry, and the
+    notification shown while a PIN pad reader asks for the PIN.
   - `main.rs` serves clients and decides who may use which token.
 - `signing-server/`: `lt-eid-signing-server`, an Elpako Signer stand-in for
   logging in to epaslaugos.lt. A client of the module like any other.
@@ -107,6 +108,13 @@ jar's name), shown nicer for known ones ("firefox" becomes "Firefox").
 
 Dialogs use `pinentry` from `$PATH`, or `$LT_EID_PINENTRY`. Start `lt-eidd`
 from inside the desktop session so pinentry can open a window.
+
+With a PIN pad reader (OpenSC reports `CKF_PROTECTED_AUTHENTICATION_PATH`),
+the reader asks for PINs on its keypad instead, while the daemon shows a
+desktop notification (sent with `gdbus`) pointing there; a wrong PIN makes
+the reader ask again. A PIN pad reader that can't do PACE can't take the eID
+PIN; then the pinentry dialog asks for it. The CAN always comes from the
+pinentry dialog, so it can be cached.
 
 ## Build and try
 

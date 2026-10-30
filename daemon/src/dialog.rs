@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
-//! PIN and approval dialogs, shown through pinentry.
+//! PIN and approval dialogs, shown through pinentry, and the notification
+//! shown while a PIN pad reader asks for the PIN.
 
 use std::ffi::OsString;
 use std::io::{self, BufRead, BufReader, Write};
@@ -118,6 +119,24 @@ impl Dialogs {
         input.interact().map_err(failed)
     }
 
+    /// Tell the user to enter the PIN of `token` on the reader, until the
+    /// returned notice is dropped. `error` explains why we ask again after a
+    /// failed attempt.
+    pub fn reader_pin(&self, app: &str, token: &Token, purpose: Purpose, error: Option<&str>) -> Notice {
+        let summary = match token.role {
+            Role::Auth => "Enter your eID PIN on the card reader",
+            Role::Qes => "Enter PIN.QES on the card reader",
+        };
+        let mut body = describe(app, token, purpose);
+        if let Some(error) = error {
+            body = format!("{error} {summary}.\n\n{body}");
+        }
+        if token.flags & CKF_USER_PIN_FINAL_TRY != 0 {
+            body += "\n\nThis is the last try: a wrong PIN will block it.";
+        }
+        Notice::show(summary, &body)
+    }
+
     /// Ask for the card access number of a newly inserted card. `error`
     /// explains why we ask again after a failed attempt.
     pub fn can(&self, error: Option<&str>) -> Result<SecretString, CK_RV> {
@@ -139,6 +158,82 @@ impl Dialogs {
         }
         input.interact().map_err(failed)
     }
+}
+
+/// A desktop notification, closed when dropped. Sent with gdbus, which
+/// comes with GLib; if that fails, there is just no notification.
+pub struct Notice {
+    id: Option<u32>,
+}
+
+impl Notice {
+    fn show(summary: &str, body: &str) -> Self {
+        let id = notifications("Notify")
+            .args([&gvariant_str(TITLE), "uint32 0", "'auth-smartcard'", &gvariant_str(summary)])
+            .arg(gvariant_str(&markup_escape(body)))
+            // Critical: GNOME keeps it up until we close it.
+            .args(["@as []", "{'urgency': <byte 2>}", "int32 -1"])
+            .output()
+            .map_err(|e| e.to_string())
+            .and_then(|out| {
+                // Prints the ID as "(uint32 42,)".
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                stdout
+                    .trim()
+                    .strip_prefix("(uint32 ")
+                    .and_then(|rest| rest.strip_suffix(",)"))
+                    .and_then(|id| id.parse().ok())
+                    .ok_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned())
+            });
+        match id {
+            Ok(id) => Notice { id: Some(id) },
+            Err(e) => {
+                eprintln!("notification: {e}");
+                Notice { id: None }
+            }
+        }
+    }
+}
+
+impl Drop for Notice {
+    fn drop(&mut self) {
+        if let Some(id) = self.id {
+            let _ = notifications("CloseNotification").arg(format!("uint32 {id}")).output();
+        }
+    }
+}
+
+/// A gdbus call of `method` on the desktop's notification service.
+fn notifications(method: &str) -> Command {
+    let mut command = Command::new("gdbus");
+    command
+        .args(["call", "--session", "--dest=org.freedesktop.Notifications"])
+        .args(["--object-path=/org/freedesktop/Notifications"])
+        .arg(format!("--method=org.freedesktop.Notifications.{method}"))
+        .stdin(Stdio::null());
+    command
+}
+
+/// `s` as a GVariant text format string, as gdbus parses its arguments.
+fn gvariant_str(s: &str) -> String {
+    let mut quoted = String::from("'");
+    for c in s.chars() {
+        match c {
+            '\'' | '\\' => {
+                quoted.push('\\');
+                quoted.push(c);
+            }
+            '\n' => quoted.push_str("\\n"),
+            c => quoted.push(c),
+        }
+    }
+    quoted.push('\'');
+    quoted
+}
+
+/// Notification bodies may contain markup.
+fn markup_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
 }
 
 // libgpg-error codes pinentry answers with (the low 16 bits of an ERR).

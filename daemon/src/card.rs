@@ -27,6 +27,26 @@ fn role(label: &str) -> Role {
     if label.ends_with("(PIN.QES)") { Role::Qes } else { Role::Auth }
 }
 
+/// Where a login gets the PIN from.
+#[derive(Clone, Copy)]
+pub enum Pin<'a> {
+    /// Typed into our dialog.
+    Typed(&'a [u8]),
+    /// The reader asks for it on its own keypad.
+    Reader,
+}
+
+impl Pin<'_> {
+    /// For `C_Login`. OpenSC only reads the PIN, the `*mut` is a C API wart.
+    fn raw(self) -> (*mut CK_UTF8CHAR, CK_ULONG) {
+        match self {
+            Pin::Typed(pin) => (pin.as_ptr() as *mut _, pin.len() as CK_ULONG),
+            // No PIN: OpenSC lets the reader's PIN pad collect it.
+            Pin::Reader => (null_mut(), 0),
+        }
+    }
+}
+
 /// Why storing a CAN failed.
 pub enum CanError {
     /// The card refused it.
@@ -267,12 +287,11 @@ impl Card {
     ///
     /// There is deliberately no logout: the lteid driver tears down the PACE
     /// channel on logout, which would log out every token on the card.
-    pub fn login(&mut self, slot: CK_SLOT_ID, pin: &[u8]) -> Result<u64, CK_RV> {
+    pub fn login(&mut self, slot: CK_SLOT_ID, pin: Pin) -> Result<u64, CK_RV> {
         // Right or wrong, the PIN changes the retry counters.
         self.tokens = None;
         self.with_session(slot, |p11, session| {
-            // OpenSC only reads the PIN, the `*mut` is a C API wart.
-            let (pin, len) = (pin.as_ptr() as *mut _, pin.len() as CK_ULONG);
+            let (pin, len) = pin.raw();
             match unsafe { p11.C_Login(session, CKU_USER, pin, len) } {
                 // OpenSC still counts an earlier login that we no longer
                 // trust (the card lost it), and returns without checking the
@@ -323,7 +342,7 @@ impl Card {
         key: CK_OBJECT_HANDLE,
         mechanism: CK_MECHANISM_TYPE,
         data: &[u8],
-        pin: Option<&[u8]>,
+        pin: Option<Pin>,
     ) -> Result<Vec<u8>, CK_RV> {
         if pin.is_some() {
             // Right or wrong, the PIN changes the retry counters.
@@ -335,8 +354,8 @@ impl Card {
             check(p11.C_SignInit(session, &mut mechanism, key))?;
             started = true;
             if let Some(pin) = pin {
-                // OpenSC only reads the PIN, the `*mut` is a C API wart.
-                check(p11.C_Login(session, CKU_CONTEXT_SPECIFIC, pin.as_ptr() as *mut _, pin.len() as CK_ULONG))?;
+                let (pin, len) = pin.raw();
+                check(p11.C_Login(session, CKU_CONTEXT_SPECIFIC, pin, len))?;
             }
             // Big enough for any EC or RSA signature, so no size query.
             let mut signature = vec![0u8; 1024];
