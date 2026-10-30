@@ -1,0 +1,41 @@
+From 221a43e380fa46acb542cbb1986d303d3a365a05 Mon Sep 17 00:00:00 2001
+From: Tadas Sasnauskas <tadas@yoyo.lt>
+Date: Fri, 30 Oct 2026 14:41:57 +0200
+Subject: [PATCH] reader-pcsc: report a card replaced between event checks
+
+pcsc_wait_for_event() only reported card events when the PRESENT state
+flipped. A card removed and inserted again between two calls is present
+both times, so pkcs11's card_detect() saw no event, skipped
+refresh_attributes() (which does compare the event counter) and kept the
+stale card: every operation then failed with CKR_DEVICE_REMOVED until the
+card was seen absent. Compare the event counter in the high word here too
+and report such a change as removal plus insertion.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/libopensc/reader-pcsc.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/src/libopensc/reader-pcsc.c b/src/libopensc/reader-pcsc.c
+index d656d5fba..6b45319e7 100644
+--- a/src/libopensc/reader-pcsc.c
++++ b/src/libopensc/reader-pcsc.c
+@@ -1855,6 +1855,15 @@ static int pcsc_wait_for_event(sc_context_t *ctx, unsigned int event_mask, sc_re
+ 						*event |= SC_EVENT_CARD_REMOVED;
+ 					}
+ 
++					/* A card removed and inserted again since the last call is
++					 * present both times; the event counter in the high word
++					 * tells (pcsc-lite 1.6.5+, as in refresh_attributes()). */
++					if ((state & SCARD_STATE_PRESENT) && (prev_state & SCARD_STATE_PRESENT)
++							&& (state & 0xFFFF0000) != (prev_state & 0xFFFF0000)) {
++						sc_log(ctx, "card replaced event");
++						*event |= SC_EVENT_CARD_REMOVED | SC_EVENT_CARD_INSERTED;
++					}
++
+ 					if ((state & SCARD_STATE_UNKNOWN) && !(prev_state & SCARD_STATE_UNKNOWN)) {
+ 						sc_log(ctx, "reader detached event");
+ 						*event |= SC_EVENT_READER_DETACHED;
+-- 
+2.56.0
+

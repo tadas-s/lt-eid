@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        9%{?dist}
+Release:        10%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -26,6 +26,8 @@ Patch0:         opensc-static-libopensc.patch
 # lteid driver: PACE PIN on the pin pad of PACE capable readers, reader PACE
 # result checks, reader secure messaging teardown.
 Patch1:         opensc-lteid-pace-reader.patch
+# Notice a card removed and inserted again between two token list queries.
+Patch2:         opensc-pcsc-card-replaced.patch
 
 ExclusiveArch:  %{rust_arches}
 
@@ -68,6 +70,7 @@ Elpako-based sites (epaslaugos.lt) use to log in with the eID.
 mv opensc-0.27.1 opensc
 %patch -P0 -p1 -d opensc
 %patch -P1 -p1 -d opensc
+%patch -P2 -p1 -d opensc
 mkdir -p .cargo
 cat > .cargo/config.toml <<'EOF'
 [source.crates-io]
@@ -162,6 +165,10 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Fri Oct 30 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-10
+- Bundled OpenSC: notice a card removed and inserted again while no
+  application used it; it failed with CKR_DEVICE_REMOVED until seen absent
+
 * Fri Oct 30 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-9
 - With a PIN pad reader, let the reader ask for PINs and show a notification
   pointing there; fall back to the PIN dialog where the reader can't do it
