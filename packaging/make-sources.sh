@@ -1,7 +1,7 @@
 #!/bin/bash
 # Put what packaging/lt-eid.spec needs into the rpmbuild SOURCES directory:
 # a tarball of this tree (uncommitted changes included), the vendored Rust
-# crates, the OpenSC patch and, if missing, the OpenSC snapshot.
+# crates, the OpenSC patches and, if missing, the OpenSC snapshot.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -20,7 +20,7 @@ git ls-files --cached --others --exclude-standard -z |
 cargo vendor --locked --quiet "$tmp/vendor" >/dev/null
 tar -C "$tmp" -cJf "$out/$name-vendor.tar.xz" vendor
 
-cp packaging/opensc-static-libopensc.patch "$out/"
+cp packaging/*.patch "$out/"
 
 opensc_tar="$out/opensc-$opensc_version.tar.gz"
 if [ ! -e "$opensc_tar" ]; then

@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        7%{?dist}
+Release:        8%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -23,6 +23,9 @@ Source1:        %{name}-%{version}-vendor.tar.xz
 Source2:        opensc-%{opensc_version}.tar.gz
 # Build libopensc into opensc-pkcs11.so and the tools; install no libopensc.so.
 Patch0:         opensc-static-libopensc.patch
+# lteid driver: PACE PIN on the pin pad of PACE capable readers, reader PACE
+# result checks, reader secure messaging teardown.
+Patch1:         opensc-lteid-pace-reader.patch
 
 ExclusiveArch:  %{rust_arches}
 
@@ -62,6 +65,7 @@ Elpako-based sites (epaslaugos.lt) use to log in with the eID.
 %setup -q -T -D -a 2
 mv opensc-0.27.1 opensc
 %patch -P0 -p1 -d opensc
+%patch -P1 -p1 -d opensc
 mkdir -p .cargo
 cat > .cargo/config.toml <<'EOF'
 [source.crates-io]
@@ -156,6 +160,9 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Fri Oct 30 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-8
+- Bundled OpenSC: support PACE capable pin pad readers in the lteid driver
+
 * Wed Oct 28 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-7
 - Cache the token list in lt-eidd: OpenSC reads the PIN retry counters from
   the card for every token query, which made listing tokens take seconds

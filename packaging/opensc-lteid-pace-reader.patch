@@ -1,0 +1,160 @@
+From 72958de542a574241cccce4ad6a4dd59c0db9f70 Mon Sep 17 00:00:00 2001
+From: Tadas Sasnauskas <tadas@yoyo.lt>
+Date: Fri, 30 Oct 2026 13:58:49 +0200
+Subject: [PATCH] lteid: support PACE capable pin pad readers
+
+With a reader doing PACE itself (e.g. REINER SCT cyberJack RFID komfort):
+
+- Let the reader ask for the PACE PIN on its pin pad when no PIN is given
+  (SC_PIN_CMD_USE_PINPAD); fail with SC_ERROR_NOT_SUPPORTED when the
+  reader can't do PACE.
+- Check the TR-03119 result code of reader PACE: wrong PIN (63Cx, with
+  tries left), user abort, timeout and card errors were reported as
+  success, or as unparsable output. A wrong CAN would have been cached.
+- Make the reader drop its secure messaging channel (CLA=0x0C, as npa
+  and dtrust do) before every PACE and on logout. The reader keeps the
+  channel after the process that established it disconnects, so the next
+  PACE failed and the cached CAN got deleted.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/libopensc/card-lteid.c | 83 +++++++++++++++++++++++++++++++++++---
+ 1 file changed, 77 insertions(+), 6 deletions(-)
+
+diff --git a/src/libopensc/card-lteid.c b/src/libopensc/card-lteid.c
+index a582eb7b9..1c4507410 100644
+--- a/src/libopensc/card-lteid.c
++++ b/src/libopensc/card-lteid.c
+@@ -27,6 +27,7 @@
+ #include "common/compat_strlcat.h"
+ #include "internal.h"
+ #include "opensc.h"
++#include "reader-tr03119.h"
+ #include "sm/sm-eac.h"
+ 
+ static const struct sc_card_operations *iso_ops = NULL;
+@@ -180,6 +181,62 @@ lteid_get_can(sc_card_t *card, struct establish_pace_channel_input *pace_input)
+ 	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+ }
+ 
++// When PACE is done by the reader, SM ends in the reader and sc_sm_stop() doesn't affect it.
++// Like npa and dtrust drivers, provoke an SM error with CLA=0x0C so that the reader drops the channel.
++static void
++lteid_reader_sm_stop(sc_card_t *card)
++{
++	struct sc_apdu apdu;
++
++	if (!(card->reader->capabilities & SC_READER_CAP_PACE_GENERIC))
++		return;
++
++	sc_format_apdu(card, &apdu, SC_APDU_CASE_1, 0xA4, 0x00, 0x00);
++	apdu.cla = 0x0C;
++	if (SC_SUCCESS != sc_transmit_apdu(card, &apdu))
++		sc_log(card->ctx, "Warning: could not stop reader secure messaging.");
++}
++
++// PACE done by the reader reports its outcome in the TR-03119 result code, not in the return value.
++static int
++lteid_check_reader_pace_result(sc_card_t *card, const struct establish_pace_channel_output *pace_output, int *tries_left)
++{
++	const uint32_t result = pace_output->result;
++	const unsigned int sw1 = (result >> 8) & 0xff;
++	const unsigned int sw2 = result & 0xff;
++
++	if (result == EAC_SUCCESS)
++		return SC_SUCCESS;
++
++	sc_log(card->ctx, "Reader PACE result 0x%08X, MSE:Set AT SW %02X%02X.", result,
++			pace_output->mse_set_at_sw1, pace_output->mse_set_at_sw2);
++
++	switch (result) {
++	case EAC_ERROR_ABORTED:
++		return SC_ERROR_KEYPAD_CANCELLED;
++	case EAC_ERROR_TIMEOUT:
++		return SC_ERROR_KEYPAD_TIMEOUT;
++	case EAC_ERROR_NO_CARD:
++		return SC_ERROR_CARD_REMOVED;
++	case EAC_ERROR_COMMUNICATION:
++		return SC_ERROR_TRANSMIT_FAILED;
++	default:
++		break;
++	}
++
++	// Negative card response to one of the PACE steps: 0xF0XX0000 | SW1SW2
++	if ((result & 0xFF000000) == 0xF0000000) {
++		if (sw1 == 0x63 && (sw2 & 0xf0) == 0xc0) {
++			if (tries_left)
++				*tries_left = sw2 & 0x0f;
++			return SC_ERROR_PIN_CODE_INCORRECT;
++		}
++		return sc_check_sw(card, sw1, sw2);
++	}
++
++	return SC_ERROR_CARD_CMD_FAILED;
++}
++
+ static int
+ lteid_perform_pace(struct sc_card *card, const int ref, const unsigned char *pin, size_t pinlen, int *tries_left)
+ {
+@@ -194,18 +251,37 @@ lteid_perform_pace(struct sc_card *card, const int ref, const unsigned char *pin
+ 		drv_data->pace = 0;
+ 		drv_data->pace_pin_ref = 0;
+ 	}
++	// Unconditionally: the reader keeps its channel after the process that established it disconnects.
++	lteid_reader_sm_stop(card);
+ 
+ 	if (ref == PACE_PIN_ID_CAN && !pin) {
+ 		if (SC_SUCCESS != lteid_get_can(card, &pace_input)) {
+ 			LOG_FUNC_RETURN(card->ctx, SC_ERROR_UNKNOWN);
+ 		}
+ 	} else {
++		if (!pin && !(card->reader->capabilities & SC_READER_CAP_PACE_GENERIC)) {
++			sc_log(card->ctx, "No PIN given for PACE pin ref 0x%02x and reader can't do PACE with its pin pad.", ref);
++			LOG_FUNC_RETURN(card->ctx, SC_ERROR_NOT_SUPPORTED);
++		}
++		if (!pin)
++			sc_log(card->ctx, "Letting the reader prompt for PACE pin ref 0x%02x on its pin pad.", ref);
+ 		pace_input.pin_id = ref;
+ 		pace_input.pin = pin;
+ 		pace_input.pin_length = pinlen;
+ 	}
+ 
+ 	int rv = perform_pace(card, pace_input, &pace_output, EAC_TR_VERSION_2_02);
++	// The reader may answer a failed PACE with just the result code, which OpenSC fails to parse after storing it.
++	if ((rv == SC_SUCCESS || pace_output.result != EAC_SUCCESS) && card->reader->capabilities & SC_READER_CAP_PACE_GENERIC) {
++		rv = lteid_check_reader_pace_result(card, &pace_output, tries_left);
++	}
++
++	free(pace_output.ef_cardaccess);
++	free(pace_output.recent_car);
++	free(pace_output.previous_car);
++	free(pace_output.id_icc);
++	free(pace_output.id_pcd);
++
+ 	if (rv != SC_SUCCESS) {
+ 		sc_log(card->ctx, "Error performing PACE for pin ref 0x%02x.", ref);
+ 
+@@ -238,12 +314,6 @@ lteid_perform_pace(struct sc_card *card, const int ref, const unsigned char *pin
+ 	drv_data->pace = 1;
+ 	drv_data->pace_pin_ref = ref;
+ 
+-	free(pace_output.ef_cardaccess);
+-	free(pace_output.recent_car);
+-	free(pace_output.previous_car);
+-	free(pace_output.id_icc);
+-	free(pace_output.id_pcd);
+-
+ 	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+ }
+ 
+@@ -310,6 +380,7 @@ lteid_logout(sc_card_t *card)
+ 	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+ 
+ 	sc_sm_stop(card);
++	lteid_reader_sm_stop(card);
+ 
+ 	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+ }
+-- 
+2.56.0
+
