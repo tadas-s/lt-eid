@@ -47,6 +47,11 @@ Tokens advertise `CKF_PROTECTED_AUTHENTICATION_PATH`, so applications call
 - asks for the PIN if the token is logged out. It retries on a wrong PIN,
   showing the card's retry warnings, and rejects a PIN of the wrong length
   before it reaches the card. Cancel returns `CKR_FUNCTION_CANCELED`.
+- resumes the eID PIN if two wrong tries suspended it: the card then takes
+  its last try only after PACE with the CAN. The PIN from the dialog goes to
+  `lteid-tool --resume` (which uses the cached CAN), with OpenSC restarted
+  around it as for the CAN below, and then logs in as usual. A wrong PIN
+  there blocks it; a blocked PIN returns `CKR_PIN_LOCKED`.
 - asks only for approval (Allow / Deny) if another application already
   logged the token in.
 

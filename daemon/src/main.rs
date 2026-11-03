@@ -14,7 +14,8 @@
 //!
 //! A card can only be opened with its card access number (CAN), which the
 //! lteid driver keeps in a cache. When a card is inserted that the cached
-//! CAN doesn't open, the daemon asks for its CAN.
+//! CAN doesn't open, the daemon asks for its CAN. The CAN also resumes the
+//! eID PIN after two wrong tries suspended it, as part of the next login.
 
 mod card;
 mod dialog;
@@ -244,7 +245,7 @@ impl Daemon {
             let pin = self.dialogs.pin(&client.app, &token, purpose, error.as_deref());
             eprintln!("{client}: PIN dialog {}", outcome(&pin, shown));
             let pin = pin?;
-            let pin = pin.expose_secret().as_bytes();
+            let pin = pin.expose_secret();
             // Don't spend a card attempt on a PIN that can't be right.
             let len = pin.len() as u64;
             if len < token.min_pin_len || len > token.max_pin_len {
@@ -253,7 +254,20 @@ impl Daemon {
                 continue;
             }
             let mut card = lock(&self.card);
-            match attempt(&mut card, pin) {
+            // Two wrong eID PINs suspend it: its last try must be resumed
+            // with the CAN first. That ends every login (OpenSC restarts),
+            // then `attempt` logs in again with the PIN now known right.
+            let suspended = token.role == Role::Auth && token.flags & CKF_USER_PIN_FINAL_TRY != 0;
+            let result = if suspended {
+                eprintln!("{client}: PIN of {:?} is suspended, resuming it with the CAN", token.label);
+                card.resume_pin(pin).and_then(|()| {
+                    eprintln!("{client}: PIN of {:?} resumed", token.label);
+                    attempt(&mut card, pin.as_bytes())
+                })
+            } else {
+                attempt(&mut card, pin.as_bytes())
+            };
+            match result {
                 Err(CKR_PIN_INCORRECT) => {
                     eprintln!("{client}: wrong PIN");
                     error = Some("Wrong PIN.".to_owned());

@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        11%{?dist}
+Release:        12%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -159,6 +159,10 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Tue Nov 03 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-12
+- Resume the eID PIN suspended after two wrong tries with the cached CAN as
+  part of the next login, instead of failing with CKR_PIN_LOCKED
+
 * Tue Nov 03 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-11
 - Drop PACE capable pin pad reader support (lteid driver patch and PIN entry
   on the reader): no such readers for general use

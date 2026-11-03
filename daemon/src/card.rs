@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::ptr::null_mut;
 
 use cryptoki_sys::*;
@@ -118,24 +118,26 @@ impl Card {
         self.tokens = None;
     }
 
-    /// Check `can` on the card and store it for the lteid driver, using
-    /// lteid-tool. OpenSC is restarted around it: it must let go of the card
-    /// for lteid-tool, and it would not retry a card it failed to open until
-    /// the card is reinserted. Every session and login ends.
-    pub fn store_can(&mut self, can: &str) -> Result<(), CanError> {
+    /// Run lteid-tool with `args`, passing it the secret `value` in the
+    /// environment variable `var` (so it doesn't show up in ps). OpenSC is
+    /// restarted around it: it must let go of the card for lteid-tool, and
+    /// it would not retry a card it failed to open until the card is
+    /// reinserted. Every session and login ends.
+    fn run_lteid_tool(&mut self, args: &[&str], (var, value): (&str, &str)) -> Result<Output, String> {
         self.release();
-
-        // Through the environment, so the CAN doesn't show up in ps.
-        let output = Command::new(&self.lteid_tool)
-            .args(["--verify-can", "--can", "env:LT_EID_CAN"])
-            .env("LT_EID_CAN", can)
-            .stdin(Stdio::null())
-            .output();
-
+        let output = Command::new(&self.lteid_tool).args(args).env(var, value).stdin(Stdio::null()).output();
         if let Err(rv) = self.ready() {
             eprintln!("restarting OpenSC: C_Initialize: {rv:#x}");
         }
-        let output = output.map_err(|e| CanError::Failed(format!("{}: {e}", self.lteid_tool.display())))?;
+        output.map_err(|e| format!("{}: {e}", self.lteid_tool.display()))
+    }
+
+    /// Check `can` on the card and store it for the lteid driver, using
+    /// lteid-tool (see `run_lteid_tool`).
+    pub fn store_can(&mut self, can: &str) -> Result<(), CanError> {
+        let output = self
+            .run_lteid_tool(&["--verify-can", "--can", "env:LT_EID_CAN"], ("LT_EID_CAN", can))
+            .map_err(CanError::Failed)?;
         if output.status.success() {
             return Ok(());
         }
@@ -144,6 +146,34 @@ impl Card {
             Err(CanError::Wrong)
         } else {
             Err(CanError::Failed(stderr.trim().to_owned()))
+        }
+    }
+
+    /// Resume the eID PIN after two wrong tries suspended it, using
+    /// lteid-tool (see `run_lteid_tool`): the card takes a third try only
+    /// through PACE with the CAN (the driver's cached one) first, and PACE
+    /// with the PIN inside that channel, which the lteid driver can't do on
+    /// its own. Right resets the retry counter; wrong blocks the PIN.
+    pub fn resume_pin(&mut self, pin: &str) -> Result<(), CK_RV> {
+        let output = self
+            .run_lteid_tool(&["--resume", "--pin", "env:LT_EID_PIN"], ("LT_EID_PIN", pin))
+            .map_err(|e| {
+                eprintln!("{e}");
+                CKR_FUNCTION_FAILED
+            })?;
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // "Not blocked": the PIN was not suspended after all, nothing to do.
+        if output.status.success() || stderr.contains("is not blocked") {
+            // OpenSC looks for the card again when asked for the slots.
+            self.tokens()?;
+            Ok(())
+        } else if stderr.contains("PIN code verification failed") {
+            Err(CKR_PIN_INCORRECT)
+        } else if stderr.contains("fully blocked") {
+            Err(CKR_PIN_LOCKED)
+        } else {
+            eprintln!("lteid-tool --resume: {}", stderr.trim());
+            Err(CKR_FUNCTION_FAILED)
         }
     }
 
