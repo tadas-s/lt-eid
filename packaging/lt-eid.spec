@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        10%{?dist}
+Release:        11%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -23,11 +23,8 @@ Source1:        %{name}-%{version}-vendor.tar.xz
 Source2:        opensc-%{opensc_version}.tar.gz
 # Build libopensc into opensc-pkcs11.so and the tools; install no libopensc.so.
 Patch0:         opensc-static-libopensc.patch
-# lteid driver: PACE PIN on the pin pad of PACE capable readers, reader PACE
-# result checks, reader secure messaging teardown.
-Patch1:         opensc-lteid-pace-reader.patch
 # Notice a card removed and inserted again between two token list queries.
-Patch2:         opensc-pcsc-card-replaced.patch
+Patch1:         opensc-pcsc-card-replaced.patch
 
 ExclusiveArch:  %{rust_arches}
 
@@ -49,8 +46,6 @@ Requires:       pcsc-lite-libs%{?_isa}
 Requires:       openpace%{?_isa} >= 1.1.3
 Requires:       pinentry
 Recommends:     pinentry-gnome3
-# gdbus, for the notification while a PIN pad reader asks for the PIN.
-Requires:       glib2
 Requires:       p11-kit
 
 Provides:       bundled(opensc) = %{opensc_version}
@@ -70,7 +65,6 @@ Elpako-based sites (epaslaugos.lt) use to log in with the eID.
 mv opensc-0.27.1 opensc
 %patch -P0 -p1 -d opensc
 %patch -P1 -p1 -d opensc
-%patch -P2 -p1 -d opensc
 mkdir -p .cargo
 cat > .cargo/config.toml <<'EOF'
 [source.crates-io]
@@ -165,6 +159,10 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/p11-kit/modules/lt-eid.module
 
 %changelog
+* Tue Nov 03 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-11
+- Drop PACE capable pin pad reader support (lteid driver patch and PIN entry
+  on the reader): no such readers for general use
+
 * Fri Oct 30 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-10
 - Bundled OpenSC: notice a card removed and inserted again while no
   application used it; it failed with CKR_DEVICE_REMOVED until seen absent
