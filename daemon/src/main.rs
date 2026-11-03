@@ -36,7 +36,7 @@ use std::time::Instant;
 
 use cryptoki_sys::*;
 use lt_eid_proto::{Attr, PROTO_VERSION, Request, Response, Role, Token, read_frame, write_frame};
-use secrecy::ExposeSecret;
+use secrecy::{ExposeSecret, SecretString};
 
 use card::{Card, CanError};
 use dialog::{Dialogs, Purpose};
@@ -279,6 +279,93 @@ impl Daemon {
         }
     }
 
+    /// Change the card's PIN. The eID PIN and PIN.QES are one PIN to the
+    /// user, so both change to the same new PIN. The current PIN is checked
+    /// by logging in with it first, which also resumes a suspended one;
+    /// lteid-tool, which changes them, would spend a try on a wrong one
+    /// for each. Tells the user the outcome.
+    fn change_pin(&self, client: &Client) -> Result<(), CK_RV> {
+        let _dialog = lock(&self.dialog);
+        let tokens = lock(&self.card).tokens()?;
+        let token = |role| tokens.iter().find(|t| t.role == role).cloned();
+        let (Some(auth), Some(qes)) = (token(Role::Auth), token(Role::Qes)) else {
+            eprintln!("{client}: no card to change the PIN of");
+            self.dialogs.message("Insert your Lithuanian eID card, then try again.");
+            return Err(CKR_TOKEN_NOT_PRESENT);
+        };
+        let blocked = "Your eID PIN is blocked after three wrong tries. Only the PUK can unblock it.";
+        // Then only the eID PIN would change, and they would differ.
+        if qes.flags & CKF_USER_PIN_LOCKED != 0 {
+            eprintln!("{client}: PIN of {:?} is blocked, not changing the PIN", qes.label);
+            self.dialogs.message(blocked);
+            return Err(CKR_PIN_LOCKED);
+        }
+        eprintln!("{client}: changing the PIN");
+
+        let slot = auth.slot;
+        let current = self.with_pin(client, auth.clone(), Purpose::ChangePin, |card, pin| {
+            card.login(slot, pin)?;
+            // From the dialog's string, so valid UTF-8.
+            Ok(SecretString::from(String::from_utf8_lossy(pin).into_owned()))
+        });
+        let current = match current {
+            Ok(current) => current,
+            Err(CKR_PIN_LOCKED) => {
+                self.dialogs.message(blocked);
+                return Err(CKR_PIN_LOCKED);
+            }
+            Err(rv) => return Err(rv),
+        };
+
+        // What both PINs allow, within lteid-tool's own 6 to 12 digits.
+        let min = auth.min_pin_len.max(qes.min_pin_len).max(6);
+        let max = auth.max_pin_len.min(qes.max_pin_len).min(12);
+        let mut error = None;
+        let new = loop {
+            let shown = Instant::now();
+            let new = self.dialogs.new_pin(min, max, error);
+            eprintln!("{client}: new PIN dialog {}", outcome(&new, shown));
+            let new = new?;
+            let digits = new.expose_secret();
+            if (min..=max).contains(&(digits.len() as u64)) && digits.bytes().all(|b| b.is_ascii_digit()) {
+                break new;
+            }
+            error = Some("The PIN must be digits only, and of the right length.");
+        };
+
+        let change = lock(&self.card).change_pin(current.expose_secret(), new.expose_secret());
+        let (text, result) = match (change.auth, change.qes) {
+            (true, true) => {
+                eprintln!("{client}: PIN changed");
+                ("The PIN of your eID card was changed. Use the new PIN from now on.".to_owned(), Ok(()))
+            }
+            (true, false) => {
+                eprintln!("{client}: only the eID PIN changed: {}", change.error);
+                let text = format!(
+                    "Only the PIN for logging in was changed, not the one for signing (PIN.QES). \
+                     Log in with the new PIN, sign with the old one.\n\n{}",
+                    change.error
+                );
+                (text, Err(CKR_FUNCTION_FAILED))
+            }
+            (false, true) => {
+                eprintln!("{client}: only PIN.QES changed: {}", change.error);
+                let text = format!(
+                    "Only the PIN for signing (PIN.QES) was changed, not the one for logging in. \
+                     Log in with the old PIN, sign with the new one.\n\n{}",
+                    change.error
+                );
+                (text, Err(CKR_FUNCTION_FAILED))
+            }
+            (false, false) => {
+                eprintln!("{client}: PIN change failed: {}", change.error);
+                (format!("The PIN was not changed.\n\n{}", change.error), Err(CKR_FUNCTION_FAILED))
+            }
+        };
+        self.dialogs.message(&text);
+        result
+    }
+
     /// A Lithuanian eID was inserted into `reader`. If the cached CAN
     /// doesn't open it, ask for the card's CAN until it works or the user
     /// gives up; the next try is when the card is inserted again.
@@ -365,6 +452,7 @@ impl Daemon {
                 .map(Response::Signature)
                 // The spec's code for "the user rejected the signature".
                 .map_err(|rv| if rv == CKR_FUNCTION_CANCELED { CKR_FUNCTION_REJECTED } else { rv }),
+            Request::ChangePin => self.change_pin(client).map(|()| Response::Ok),
         }
     }
 }

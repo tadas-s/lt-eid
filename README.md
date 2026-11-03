@@ -23,6 +23,7 @@ connection to the card, so PACE runs once and clients never fight over it.
   - `main.rs` serves clients and decides who may use which token.
 - `signing-server/`: `lt-eid-signing-server`, an Elpako Signer stand-in for
   logging in to epaslaugos.lt. A client of the module like any other.
+- `cli/`: `lt-eid`, which asks the daemon to manage the card's PINs.
 
 ## Status
 
@@ -112,6 +113,25 @@ jar's name), shown nicer for known ones ("firefox" becomes "Firefox").
 
 Dialogs use `pinentry` from `$PATH`, or `$LT_EID_PINENTRY`. Start `lt-eidd`
 from inside the desktop session so pinentry can open a window.
+
+## Changing the PIN
+
+The card has two PINs, the eID PIN and PIN.QES, that are one PIN to the
+user. `lt-eid change-pin` (also the "Change eID PIN" desktop entry) asks the
+daemon to change both; the daemon shows every dialog, so no terminal is
+needed:
+
+1. The current PIN, checked by logging in to the authentication token
+   (which also resumes a suspended PIN). A wrong one asks again, as at login.
+2. The new PIN, twice, digits only, of a length both PINs allow.
+3. `lteid-tool --change-pin --new-pin` (`--new-pin` is our patch to the
+   bundled OpenSC) changes the eID PIN, then PIN.QES; OpenSC is restarted
+   around it, as for the CAN.
+4. A message with the outcome, saying which PIN to use for what if only one
+   of them changed.
+
+A blocked PIN.QES refuses the change up front, as only the eID PIN would
+change.
 
 ## Build and try
 

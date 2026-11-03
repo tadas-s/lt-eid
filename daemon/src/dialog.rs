@@ -14,12 +14,16 @@ const TITLE: &str = "Lithuanian eID";
 /// Seconds before an unanswered dialog counts as cancelled.
 const TIMEOUT: u16 = 60;
 const CAN_TIMEOUT: u16 = 300;
+/// Long enough to come back and read it; meanwhile no other dialog shows.
+const MESSAGE_TIMEOUT: u16 = 300;
 
 /// Why a dialog is shown.
 #[derive(Clone, Copy)]
 pub enum Purpose {
     Login,
     Sign,
+    /// The current PIN, before changing it.
+    ChangePin,
 }
 
 pub struct Dialogs {
@@ -37,7 +41,7 @@ impl Dialogs {
     /// someone already logged in to, or to sign.
     pub fn approve(&self, app: &str, token: &Token, purpose: Purpose) -> Result<(), CK_RV> {
         let ok = match purpose {
-            Purpose::Login => "Allow",
+            Purpose::Login | Purpose::ChangePin => "Allow",
             Purpose::Sign => "Sign",
         };
         let timeout = TIMEOUT.to_string();
@@ -48,7 +52,7 @@ impl Dialogs {
             ("SETCANCEL", "Deny"),
             ("SETTIMEOUT", &timeout),
         ];
-        match self.confirm(&setup) {
+        match self.confirm(&setup, "CONFIRM") {
             Ok(true) => Ok(()),
             Ok(false) => Err(CKR_FUNCTION_CANCELED),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Err(missing(&self.binary)),
@@ -59,11 +63,21 @@ impl Dialogs {
         }
     }
 
-    /// Run pinentry's CONFIRM after the `setup` requests: `true` for OK,
-    /// `false` for Cancel or timeout. Spoken here directly because the
-    /// crate's `ConfirmationDialog` never sends its title, which leaves the
-    /// dialog headed "Message".
-    fn confirm(&self, setup: &[(&str, &str)]) -> io::Result<bool> {
+    /// Tell the user `text`, with only an OK button. Returns when it is
+    /// closed.
+    pub fn message(&self, text: &str) {
+        let timeout = MESSAGE_TIMEOUT.to_string();
+        let setup = [("SETTITLE", TITLE), ("SETDESC", text), ("SETOK", "OK"), ("SETTIMEOUT", &timeout)];
+        if let Err(e) = self.confirm(&setup, "MESSAGE") {
+            eprintln!("pinentry: {e}");
+        }
+    }
+
+    /// Run pinentry's `command` (CONFIRM or MESSAGE) after the `setup`
+    /// requests: `true` for OK, `false` for Cancel or timeout. Spoken here
+    /// directly because the crate's `ConfirmationDialog` never sends its
+    /// title, which leaves the dialog headed "Message".
+    fn confirm(&self, setup: &[(&str, &str)], command: &str) -> io::Result<bool> {
         let mut child = Command::new(&self.binary).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
         let mut input = BufReader::new(child.stdout.take().expect("piped"));
         let mut output = child.stdin.take().expect("piped");
@@ -73,11 +87,11 @@ impl Dialogs {
                 output.write_all(request(command, argument).as_bytes())?;
                 reply(&mut input)?.map_err(|code| io::Error::other(format!("{command}: error {code}")))?;
             }
-            output.write_all(b"CONFIRM\n")?;
+            output.write_all(format!("{command}\n").as_bytes())?;
             match reply(&mut input)? {
                 Ok(()) => Ok(true),
                 Err(GPG_ERR_CANCELED | GPG_ERR_TIMEOUT | GPG_ERR_NOT_CONFIRMED) => Ok(false),
-                Err(code) => Err(io::Error::other(format!("CONFIRM: error {code}"))),
+                Err(code) => Err(io::Error::other(format!("{command}: error {code}"))),
             }
         })();
         let _ = output.write_all(b"BYE\n");
@@ -110,7 +124,31 @@ impl Dialogs {
             .with_ok(match purpose {
                 Purpose::Login => "Log in",
                 Purpose::Sign => "Sign",
+                Purpose::ChangePin => "Continue",
             })
+            .with_timeout(TIMEOUT);
+        if let Some(error) = error {
+            input.with_error(error);
+        }
+        input.interact().map_err(failed)
+    }
+
+    /// Ask for the new PIN, `min` to `max` digits, twice. `error` explains
+    /// why we ask again.
+    pub fn new_pin(&self, min: u64, max: u64, error: Option<&str>) -> Result<SecretString, CK_RV> {
+        let Some(mut input) = PassphraseInput::with_binary(&self.binary) else {
+            return Err(missing(&self.binary));
+        };
+        let description = format!(
+            "Enter the new PIN for your eID card: {min} to {max} digits. \
+             It will be the PIN both for logging in and for signing."
+        );
+        input
+            .with_title(TITLE)
+            .with_description(&description)
+            .with_prompt("New PIN")
+            .with_confirmation("Repeat", "The PINs don't match.")
+            .with_ok("Change PIN")
             .with_timeout(TIMEOUT);
         if let Some(error) = error {
             input.with_error(error);
@@ -201,6 +239,9 @@ fn describe(app: &str, token: &Token, purpose: Purpose) -> String {
         (Purpose::Login, Role::Qes) => "to use your eID for qualified electronic signatures",
         (Purpose::Sign, Role::Auth) => "to sign with your eID authentication key",
         (Purpose::Sign, Role::Qes) => "to make a qualified electronic signature",
+        (Purpose::ChangePin, _) => {
+            return format!("To change the PIN of your eID card, enter the current PIN.\n\n{}", token.label);
+        }
     };
     format!("{app} wants {what}.\n\n{}", token.label)
 }

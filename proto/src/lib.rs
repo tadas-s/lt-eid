@@ -40,6 +40,10 @@ pub enum Request {
     /// Sign `data` with a mechanism that takes no parameters, in one go.
     /// May show a dialog (PIN or approval) and block until it is answered.
     Sign { slot: u64, key: u64, mechanism: u64, data: Vec<u8> },
+    /// Change the card's PIN: the eID PIN and PIN.QES together. The daemon
+    /// asks for the current and new PIN and shows the outcome itself.
+    /// Blocks until done.
+    ChangePin,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

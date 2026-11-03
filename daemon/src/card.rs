@@ -27,6 +27,17 @@ fn role(label: &str) -> Role {
     if label.ends_with("(PIN.QES)") { Role::Qes } else { Role::Auth }
 }
 
+/// What a PIN change changed. The card has two PINs that are one to the
+/// user, and lteid-tool changes them one after the other.
+pub struct PinChange {
+    /// The eID PIN, for the authentication key.
+    pub auth: bool,
+    /// PIN.QES, for qualified signatures.
+    pub qes: bool,
+    /// lteid-tool's explanation of what failed.
+    pub error: String,
+}
+
 /// Why storing a CAN failed.
 pub enum CanError {
     /// The card refused it.
@@ -118,14 +129,18 @@ impl Card {
         self.tokens = None;
     }
 
-    /// Run lteid-tool with `args`, passing it the secret `value` in the
-    /// environment variable `var` (so it doesn't show up in ps). OpenSC is
+    /// Run lteid-tool with `args`, passing it `secrets` as environment
+    /// variables (so they don't show up in ps). OpenSC is
     /// restarted around it: it must let go of the card for lteid-tool, and
     /// it would not retry a card it failed to open until the card is
     /// reinserted. Every session and login ends.
-    fn run_lteid_tool(&mut self, args: &[&str], (var, value): (&str, &str)) -> Result<Output, String> {
+    fn run_lteid_tool(&mut self, args: &[&str], secrets: &[(&str, &str)]) -> Result<Output, String> {
         self.release();
-        let output = Command::new(&self.lteid_tool).args(args).env(var, value).stdin(Stdio::null()).output();
+        let output = Command::new(&self.lteid_tool)
+            .args(args)
+            .envs(secrets.iter().copied())
+            .stdin(Stdio::null())
+            .output();
         if let Err(rv) = self.ready() {
             eprintln!("restarting OpenSC: C_Initialize: {rv:#x}");
         }
@@ -136,7 +151,7 @@ impl Card {
     /// lteid-tool (see `run_lteid_tool`).
     pub fn store_can(&mut self, can: &str) -> Result<(), CanError> {
         let output = self
-            .run_lteid_tool(&["--verify-can", "--can", "env:LT_EID_CAN"], ("LT_EID_CAN", can))
+            .run_lteid_tool(&["--verify-can", "--can", "env:LT_EID_CAN"], &[("LT_EID_CAN", can)])
             .map_err(CanError::Failed)?;
         if output.status.success() {
             return Ok(());
@@ -149,6 +164,22 @@ impl Card {
         }
     }
 
+    /// Change both PINs from `current` to `new`, using lteid-tool (see
+    /// `run_lteid_tool`).
+    pub fn change_pin(&mut self, current: &str, new: &str) -> PinChange {
+        let args = ["--change-pin", "--pin", "env:LT_EID_PIN", "--new-pin", "env:LT_EID_NEW_PIN"];
+        let output = match self.run_lteid_tool(&args, &[("LT_EID_PIN", current), ("LT_EID_NEW_PIN", new)]) {
+            Ok(output) => output,
+            Err(error) => return PinChange { auth: false, qes: false, error },
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        PinChange {
+            auth: stdout.contains("PIN for authentication changed."),
+            qes: stdout.contains("PIN for signature changed."),
+            error: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+        }
+    }
+
     /// Resume the eID PIN after two wrong tries suspended it, using
     /// lteid-tool (see `run_lteid_tool`): the card takes a third try only
     /// through PACE with the CAN (the driver's cached one) first, and PACE
@@ -156,7 +187,7 @@ impl Card {
     /// its own. Right resets the retry counter; wrong blocks the PIN.
     pub fn resume_pin(&mut self, pin: &str) -> Result<(), CK_RV> {
         let output = self
-            .run_lteid_tool(&["--resume", "--pin", "env:LT_EID_PIN"], ("LT_EID_PIN", pin))
+            .run_lteid_tool(&["--resume", "--pin", "env:LT_EID_PIN"], &[("LT_EID_PIN", pin)])
             .map_err(|e| {
                 eprintln!("{e}");
                 CKR_FUNCTION_FAILED

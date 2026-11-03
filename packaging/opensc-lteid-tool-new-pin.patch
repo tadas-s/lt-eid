@@ -1,0 +1,107 @@
+From b24e4e0ca81ede99610075e8884981ad9961030d Mon Sep 17 00:00:00 2001
+From: Tadas Sasnauskas <tadas@yoyo.lt>
+Date: Tue, 3 Nov 2026 15:08:23 +0200
+Subject: [PATCH] lteid-tool: add --new-pin option for --change-pin
+
+The new PIN could only be typed on a terminal, so programs could not change it.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/tools/lteid-tool.c | 25 +++++++++++++++++--------
+ 1 file changed, 17 insertions(+), 8 deletions(-)
+
+diff --git a/src/tools/lteid-tool.c b/src/tools/lteid-tool.c
+index 3a8c6e9c4..d415d04df 100644
+--- a/src/tools/lteid-tool.c
++++ b/src/tools/lteid-tool.c
+@@ -51,6 +51,7 @@ static const struct option options[] = {
+ 		{"can",	1, NULL, 'c'},
+ 		{"pin",	1, NULL, 'p'},
+ 		{"puk",	1, NULL, 'u'},
++		{"new-pin",	1, NULL, 'n'},
+ 		{"change-pin", 0, NULL, 'C'},
+ 		{"resume",	   0, NULL, 'R'},
+ 		{"unblock",    0, NULL, 'U'},
+@@ -66,6 +67,7 @@ static const char *option_help[] = {
+ 		"Specify CAN",
+ 		"Specify PIN",
+ 		"Specify PUK",
++		"Specify new PIN (with --change-pin)",
+ 		"Change PIN",
+ 		"Resume authentication key PIN after 2 incorrect attempts",
+ 		"Unblock PIN using PUK",
+@@ -219,7 +221,7 @@ verify_and_cache_pace_can(sc_card_t *card, const char *opt_can)
+  * The procedure below follows this and applies change to both PINs.
+  */
+ int
+-change_pin(sc_card_t *card, const char *opt_pin)
++change_pin(sc_card_t *card, const char *opt_pin, const char *opt_new_pin)
+ {
+ 	int rv;
+ 	struct sc_path path;
+@@ -256,18 +258,21 @@ change_pin(sc_card_t *card, const char *opt_pin)
+ 		return SC_ERROR_PIN_CODE_INCORRECT;
+ 	}
+ 
+-	rv = input_number("New PIN", 6, 12, NULL, &new_pin);
++	rv = input_number("New PIN", 6, 12, opt_new_pin, &new_pin);
+ 
+ 	if (rv != SC_SUCCESS) {
+ 		fprintf(stderr, "PIN number blank, too short or too long.\n");
+ 		return SC_ERROR_PIN_CODE_INCORRECT;
+ 	}
+ 
+-	input_number("New PIN (repeat)", 6, 12, NULL, &new_pin_repeated);
++	// A new PIN given on the command line is not asked again.
++	if (!opt_new_pin) {
++		input_number("New PIN (repeat)", 6, 12, NULL, &new_pin_repeated);
+ 
+-	if (new_pin_repeated == NULL || strcmp(new_pin, new_pin_repeated) != 0) {
+-		fprintf(stderr, "New PIN and repeated entry do not match. PIN was not changed.\n");
+-		return SC_ERROR_INTERNAL;
++		if (new_pin_repeated == NULL || strcmp(new_pin, new_pin_repeated) != 0) {
++			fprintf(stderr, "New PIN and repeated entry do not match. PIN was not changed.\n");
++			return SC_ERROR_INTERNAL;
++		}
+ 	}
+ 
+ 	printf("\n");
+@@ -482,6 +487,7 @@ main(int argc, char *argv[])
+ 	const char *opt_can = NULL;
+ 	const char *opt_pin = NULL;
+ 	const char *opt_puk = NULL;
++	const char *opt_new_pin = NULL;
+ 	const char *opt_reader = NULL;
+ 	int verbose = 0;
+ 	int opt_change_pin = 0;
+@@ -496,7 +502,7 @@ main(int argc, char *argv[])
+ 	struct sc_pkcs15_card *p15card = NULL;
+ 	int c, rv;
+ 
+-	while ((c = getopt_long(argc, argv, "hr:wc:p:u:vCRUV", options, (int *)0)) != -1) {
++	while ((c = getopt_long(argc, argv, "hr:wc:p:u:n:vCRUV", options, (int *)0)) != -1) {
+ 		switch (c) {
+ 		case 'r':
+ 			opt_reader = optarg;
+@@ -513,6 +519,9 @@ main(int argc, char *argv[])
+ 		case 'u':
+ 			util_get_pin(optarg, &opt_puk);
+ 			break;
++		case 'n':
++			util_get_pin(optarg, &opt_new_pin);
++			break;
+ 		case 'v':
+ 			verbose++;
+ 			break;
+@@ -574,7 +583,7 @@ main(int argc, char *argv[])
+ 	display_basic_details(p15card);
+ 
+ 	if (opt_change_pin) {
+-		err = change_pin(card, opt_pin);
++		err = change_pin(card, opt_pin, opt_new_pin);
+ 	} else if (opt_resume) {
+ 		err = resume(p15card, opt_can, opt_pin);
+ 	} else if (opt_unblock) {
+-- 
+2.56.0
+
