@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        13%{?dist}
+Release:        14%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -128,6 +128,7 @@ install -Dpm 0644 systemd/lt-eid-signing-server.service %{buildroot}%{_userunitd
 install -Dpm 0644 packaging/80-lt-eid.preset %{buildroot}%{_userpresetdir}/80-lt-eid.preset
 install -Dpm 0644 packaging/lt-eid.module %{buildroot}%{_datadir}/p11-kit/modules/lt-eid.module
 install -Dpm 0644 packaging/lt-eid-change-pin.desktop %{buildroot}%{_datadir}/applications/lt-eid-change-pin.desktop
+install -Dpm 0644 packaging/lt-eid.svg %{buildroot}%{_datadir}/icons/hicolor/scalable/apps/lt-eid.svg
 
 cp -p opensc/COPYING COPYING.opensc
 cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-licenses.txt
@@ -164,8 +165,14 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_userpresetdir}/80-lt-eid.preset
 %{_datadir}/p11-kit/modules/lt-eid.module
 %{_datadir}/applications/lt-eid-change-pin.desktop
+%{_datadir}/icons/hicolor/scalable/apps/lt-eid.svg
 
 %changelog
+* Wed Nov 04 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-14
+- Applications see a new token after a PIN change, a CAN or a PIN resume
+  (the daemon's OpenSC restarts); Firefox no longer needs a restart
+- Desktop entry renamed "Change Lithuanian eID PIN", with the lt-eid icon
+
 * Tue Nov 03 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-13
 - Change the PIN (eID PIN and PIN.QES together) with lt-eid change-pin, or
   the "Change eID PIN" desktop entry; lt-eidd shows the dialogs

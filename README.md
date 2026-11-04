@@ -126,9 +126,9 @@ from inside the desktop session so pinentry can open a window.
 ## Changing the PIN
 
 The card has two PINs, the eID PIN and PIN.QES, that are one PIN to the
-user. `lt-eid change-pin` (also the "Change eID PIN" desktop entry) asks the
-daemon to change both; the daemon shows every dialog, so no terminal is
-needed:
+user. `lt-eid change-pin` (also the "Change Lithuanian eID PIN" desktop
+entry) asks the daemon to change both; the daemon shows every dialog, so no
+terminal is needed:
 
 1. The current PIN, checked by logging in to the authentication token
    (which also resumes a suspended PIN). A wrong one asks again, as at login.

@@ -1,9 +1,9 @@
 [Desktop Entry]
 Type=Application
-Name=Change eID PIN
+Name=Change Lithuanian eID PIN
 Comment=Change the PIN of your Lithuanian eID card
 Keywords=eID;asmens tapatybės kortelė;smartcard;PIN;
 Exec=/opt/lt-eid/bin/lt-eid change-pin
-Icon=gcr-smart-card
+Icon=lt-eid
 Terminal=false
 Categories=Settings;Security;
