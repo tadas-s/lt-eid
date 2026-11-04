@@ -300,14 +300,14 @@ impl Daemon {
         let token = |role| tokens.iter().find(|t| t.role == role).cloned();
         let (Some(auth), Some(qes)) = (token(Role::Auth), token(Role::Qes)) else {
             eprintln!("{client}: no card to change the PIN of");
-            self.dialogs.message("Insert your Lithuanian eID card, then try again.");
+            self.dialogs.message("No eID card", "Insert your Lithuanian eID card, then try again.");
             return Err(CKR_TOKEN_NOT_PRESENT);
         };
         let blocked = "Your eID PIN is blocked after three wrong tries. Only the PUK can unblock it.";
         // Then only the eID PIN would change, and they would differ.
         if qes.flags & CKF_USER_PIN_LOCKED != 0 {
             eprintln!("{client}: PIN of {:?} is blocked, not changing the PIN", qes.label);
-            self.dialogs.message(blocked);
+            self.dialogs.message("eID PIN blocked", blocked);
             return Err(CKR_PIN_LOCKED);
         }
         eprintln!("{client}: changing the PIN");
@@ -321,7 +321,7 @@ impl Daemon {
         let current = match current {
             Ok(current) => current,
             Err(CKR_PIN_LOCKED) => {
-                self.dialogs.message(blocked);
+                self.dialogs.message("eID PIN blocked", blocked);
                 return Err(CKR_PIN_LOCKED);
             }
             Err(rv) => return Err(rv),
@@ -344,10 +344,11 @@ impl Daemon {
         };
 
         let change = lock(&self.card).change_pin(current.expose_secret(), new.expose_secret());
-        let (text, result) = match (change.auth, change.qes) {
+        let (heading, text, result) = match (change.auth, change.qes) {
             (true, true) => {
                 eprintln!("{client}: PIN changed");
-                ("The PIN of your eID card was changed. Use the new PIN from now on.".to_owned(), Ok(()))
+                let text = "The PIN of your eID card was changed. Use the new PIN from now on.";
+                ("PIN changed", text.to_owned(), Ok(()))
             }
             (true, false) => {
                 eprintln!("{client}: only the eID PIN changed: {}", change.error);
@@ -356,7 +357,7 @@ impl Daemon {
                      Log in with the new PIN, sign with the old one.\n\n{}",
                     change.error
                 );
-                (text, Err(CKR_FUNCTION_FAILED))
+                ("PIN partly changed", text, Err(CKR_FUNCTION_FAILED))
             }
             (false, true) => {
                 eprintln!("{client}: only PIN.QES changed: {}", change.error);
@@ -365,14 +366,14 @@ impl Daemon {
                      Log in with the old PIN, sign with the new one.\n\n{}",
                     change.error
                 );
-                (text, Err(CKR_FUNCTION_FAILED))
+                ("PIN partly changed", text, Err(CKR_FUNCTION_FAILED))
             }
             (false, false) => {
                 eprintln!("{client}: PIN change failed: {}", change.error);
-                (format!("The PIN was not changed.\n\n{}", change.error), Err(CKR_FUNCTION_FAILED))
+                ("PIN not changed", format!("The PIN was not changed.\n\n{}", change.error), Err(CKR_FUNCTION_FAILED))
             }
         };
-        self.dialogs.message(&text);
+        self.dialogs.message(heading, &text);
         result
     }
 

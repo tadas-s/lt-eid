@@ -172,6 +172,8 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 - Applications see a new token after a PIN change, a CAN or a PIN resume
   (the daemon's OpenSC restarts); Firefox no longer needs a restart
 - Desktop entry renamed "Change Lithuanian eID PIN", with the lt-eid icon
+- Dialogs have headings ("PIN changed", "Allow eID use", ...) instead of
+  pinentry's "Message"
 
 * Tue Nov 03 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-13
 - Change the PIN (eID PIN and PIN.QES together) with lt-eid change-pin, or

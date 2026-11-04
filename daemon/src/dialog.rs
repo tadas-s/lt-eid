@@ -40,13 +40,16 @@ impl Dialogs {
     /// Ask the user to let `app` go ahead without a PIN: to use a token
     /// someone already logged in to, or to sign.
     pub fn approve(&self, app: &str, token: &Token, purpose: Purpose) -> Result<(), CK_RV> {
-        let ok = match purpose {
-            Purpose::Login | Purpose::ChangePin => "Allow",
-            Purpose::Sign => "Sign",
+        let (heading, ok) = match purpose {
+            Purpose::Login | Purpose::ChangePin => ("Allow eID use", "Allow"),
+            Purpose::Sign => ("Sign with eID", "Sign"),
         };
         let timeout = TIMEOUT.to_string();
         let setup = [
             ("SETTITLE", TITLE),
+            // GNOME's pinentry shows the prompt as the dialog's heading,
+            // "Message" without one, and no title.
+            ("SETPROMPT", heading),
             ("SETDESC", &describe(app, token, purpose)),
             ("SETOK", ok),
             ("SETCANCEL", "Deny"),
@@ -63,11 +66,18 @@ impl Dialogs {
         }
     }
 
-    /// Tell the user `text`, with only an OK button. Returns when it is
-    /// closed.
-    pub fn message(&self, text: &str) {
+    /// Tell the user `text` under `heading`, with only an OK button.
+    /// Returns when it is closed.
+    pub fn message(&self, heading: &str, text: &str) {
         let timeout = MESSAGE_TIMEOUT.to_string();
-        let setup = [("SETTITLE", TITLE), ("SETDESC", text), ("SETOK", "OK"), ("SETTIMEOUT", &timeout)];
+        let setup = [
+            ("SETTITLE", TITLE),
+            // The heading, as in `approve`.
+            ("SETPROMPT", heading),
+            ("SETDESC", text),
+            ("SETOK", "OK"),
+            ("SETTIMEOUT", &timeout),
+        ];
         if let Err(e) = self.confirm(&setup, "MESSAGE") {
             eprintln!("pinentry: {e}");
         }
@@ -75,8 +85,8 @@ impl Dialogs {
 
     /// Run pinentry's `command` (CONFIRM or MESSAGE) after the `setup`
     /// requests: `true` for OK, `false` for Cancel or timeout. Spoken here
-    /// directly because the crate's `ConfirmationDialog` never sends its
-    /// title, which leaves the dialog headed "Message".
+    /// directly because the crate's `ConfirmationDialog` sends neither
+    /// title nor prompt.
     fn confirm(&self, setup: &[(&str, &str)], command: &str) -> io::Result<bool> {
         let mut child = Command::new(&self.binary).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn()?;
         let mut input = BufReader::new(child.stdout.take().expect("piped"));
