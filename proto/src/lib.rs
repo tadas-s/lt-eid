@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 /// Bumped on any incompatible change to `Request` or `Response`.
-pub const PROTO_VERSION: u32 = 4;
+pub const PROTO_VERSION: u32 = 5;
 
 /// Upper bound for a single frame. Certificates are the largest payload.
 pub const MAX_FRAME: usize = 64 * 1024;
@@ -26,9 +26,13 @@ pub enum Request {
     /// List the tokens currently present.
     Tokens,
     /// Find all objects on the token in `slot` matching `template`.
-    Find { slot: u64, template: Vec<Attr> },
+    ///
+    /// Requests that take or return object handles carry the `generation`
+    /// of the token they belong to (see `Token::generation`). For another
+    /// one the daemon answers `CKR_SESSION_HANDLE_INVALID`.
+    Find { slot: u64, generation: u64, template: Vec<Attr> },
     /// Read attributes of one object, in the order given.
-    GetAttrs { slot: u64, object: u64, types: Vec<u64> },
+    GetAttrs { slot: u64, generation: u64, object: u64, types: Vec<u64> },
     /// Log this client in to the token in `slot`. The daemon asks the user
     /// for the PIN, or only for approval if the token is already logged in.
     /// Blocks until the user answers.
@@ -39,7 +43,7 @@ pub enum Request {
     Mechanisms { slot: u64 },
     /// Sign `data` with a mechanism that takes no parameters, in one go.
     /// May show a dialog (PIN or approval) and block until it is answered.
-    Sign { slot: u64, key: u64, mechanism: u64, data: Vec<u8> },
+    Sign { slot: u64, generation: u64, key: u64, mechanism: u64, data: Vec<u8> },
     /// Change the card's PIN: the eID PIN and PIN.QES together. The daemon
     /// asks for the current and new PIN and shows the outcome itself.
     /// Blocks until done.
@@ -74,6 +78,11 @@ pub struct Token {
     pub flags: u64,
     pub min_pin_len: u64,
     pub max_pin_len: u64,
+    /// Changes whenever the daemon's object handles and logins become
+    /// invalid: the card was removed or inserted, or the daemon restarted
+    /// OpenSC (to change the PIN, store a CAN, or resume the PIN). The
+    /// token is a new one to applications then.
+    pub generation: u64,
 }
 
 /// A `CK_MECHANISM_INFO` with its mechanism type.

@@ -35,6 +35,15 @@ connection to the card, so PACE runs once and clients never fight over it.
   `CKR_FUNCTION_NOT_SUPPORTED`.
 - Sessions are local to the module. The daemon keeps one shared read-only
   session per OpenSC slot and runs each search start to finish under its lock.
+- When the daemon's object handles and logins become invalid, the tokens
+  are new ones to applications: their sessions end
+  (`CKR_SESSION_HANDLE_INVALID`, as OpenSC answers after a card swap), so
+  they set the tokens up again and log in anew. That happens when a card
+  goes or comes, and when the daemon restarts OpenSC (to change the PIN,
+  store a CAN or resume the PIN): OpenSC's object handles are pointers,
+  and a restart ends every login. Each token carries a generation for
+  this, which requests with object handles name; the daemon refuses
+  another one. NSS notices through `C_GetSessionInfo`.
 - With the daemon down, the module still loads and shows empty slots;
   operations on open sessions return `CKR_DEVICE_REMOVED`. Clients reconnect
   on their own once the daemon is back, and must log in again (object

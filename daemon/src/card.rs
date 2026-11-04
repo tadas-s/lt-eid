@@ -9,6 +9,7 @@ use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::ptr::null_mut;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cryptoki_sys::*;
 use lt_eid_proto::{Attr, AttrValue, Mechanism, Role, Token};
@@ -85,6 +86,10 @@ pub struct Card {
     /// change when the card goes or comes (see `forget_tokens`), or with a
     /// PIN attempt.
     tokens: Option<Vec<Token>>,
+    /// Bumped whenever object handles and logins become invalid (see
+    /// `Token::generation`). OpenSC's object handles are pointers, so a
+    /// handle from before could even name another object now.
+    generation: u64,
 }
 
 impl Card {
@@ -100,6 +105,8 @@ impl Card {
             logins: HashMap::new(),
             last_login: 0,
             tokens: None,
+            // Not one an earlier daemon used: OpenSC starts afresh.
+            generation: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64),
         })
     }
 
@@ -120,13 +127,27 @@ impl Card {
         }
         self.sessions.clear();
         self.logins.clear();
-        self.tokens = None;
+        self.renew();
     }
 
     /// Read the tokens from the card again next time: a card was inserted
-    /// or removed, or a reader came or went.
+    /// or removed, or a reader came or went. The tokens are new ones to
+    /// applications, as OpenSC re-reads the card.
     pub fn forget_tokens(&mut self) {
+        self.renew();
+    }
+
+    /// Object handles and logins from before are invalid now.
+    fn renew(&mut self) {
         self.tokens = None;
+        self.generation += 1;
+    }
+
+    /// Fail with `CKR_SESSION_HANDLE_INVALID`, as OpenSC does after the
+    /// card was swapped, if the client's handles are from another
+    /// generation of the tokens.
+    fn check_generation(&self, generation: u64) -> Result<(), CK_RV> {
+        if generation == self.generation { Ok(()) } else { Err(CKR_SESSION_HANDLE_INVALID) }
     }
 
     /// Run lteid-tool with `args`, passing it `secrets` as environment
@@ -219,8 +240,12 @@ impl Card {
         check(unsafe { self.p11.C_GetSlotList(CK_TRUE, slots.as_mut_ptr(), &mut count) })?;
         slots.truncate(count as usize);
         // A session or login on a slot whose token is gone is dead.
+        let before = (self.sessions.len(), self.logins.len());
         self.sessions.retain(|slot, _| slots.contains(slot));
         self.logins.retain(|slot, _| slots.contains(slot));
+        if (self.sessions.len(), self.logins.len()) != before {
+            self.generation += 1;
+        }
 
         let mut tokens = Vec::new();
         for slot in slots {
@@ -247,6 +272,7 @@ impl Card {
                 flags: info.flags,
                 min_pin_len: info.ulMinPinLen,
                 max_pin_len: info.ulMaxPinLen,
+                generation: self.generation,
             });
         }
         // Not without tokens: then the card may only be waiting for its CAN,
@@ -263,13 +289,19 @@ impl Card {
 
     /// Run `f` with the shared session for `slot`. If the session turns out
     /// to be stale (the card was reinserted), reopen it and try once more.
+    /// With the client's `generation`, for calls that take or return object
+    /// handles: only while it is the current one. A stale session ends it.
     fn with_session<T>(
         &mut self,
         slot: CK_SLOT_ID,
+        generation: Option<u64>,
         mut f: impl FnMut(&Pkcs11, CK_SESSION_HANDLE) -> Result<T, CK_RV>,
     ) -> Result<T, CK_RV> {
         self.ready()?;
         for _ in 0..2 {
+            if let Some(generation) = generation {
+                self.check_generation(generation)?;
+            }
             let session = match self.sessions.get(&slot) {
                 Some(&session) => session,
                 None => {
@@ -286,7 +318,7 @@ impl Card {
                 Err(CKR_SESSION_HANDLE_INVALID | CKR_SESSION_CLOSED) => {
                     self.sessions.remove(&slot);
                     self.logins.remove(&slot);
-                    self.tokens = None;
+                    self.renew();
                 }
                 result => {
                     if let Err(CKR_USER_NOT_LOGGED_IN | CKR_DEVICE_REMOVED | CKR_TOKEN_NOT_PRESENT) = result {
@@ -331,7 +363,7 @@ impl Card {
     pub fn login(&mut self, slot: CK_SLOT_ID, pin: &[u8]) -> Result<u64, CK_RV> {
         // Right or wrong, the PIN changes the retry counters.
         self.tokens = None;
-        self.with_session(slot, |p11, session| {
+        self.with_session(slot, None, |p11, session| {
             // OpenSC only reads the PIN, the `*mut` is a C API wart.
             let (pin, len) = (pin.as_ptr() as *mut _, pin.len() as CK_ULONG);
             match unsafe { p11.C_Login(session, CKU_USER, pin, len) } {
@@ -370,8 +402,8 @@ impl Card {
     }
 
     /// Whether `key` needs the PIN again for every signature.
-    pub fn always_authenticate(&mut self, slot: CK_SLOT_ID, key: CK_OBJECT_HANDLE) -> Result<bool, CK_RV> {
-        let values = self.get_attrs(slot, key, &[CKA_ALWAYS_AUTHENTICATE])?;
+    pub fn always_authenticate(&mut self, slot: CK_SLOT_ID, generation: u64, key: CK_OBJECT_HANDLE) -> Result<bool, CK_RV> {
+        let values = self.get_attrs(slot, generation, key, &[CKA_ALWAYS_AUTHENTICATE])?;
         Ok(matches!(values.first(), Some(AttrValue::Value(v)) if v.first().is_some_and(|&b| b != CK_FALSE)))
     }
 
@@ -381,6 +413,7 @@ impl Card {
     pub fn sign(
         &mut self,
         slot: CK_SLOT_ID,
+        generation: u64,
         key: CK_OBJECT_HANDLE,
         mechanism: CK_MECHANISM_TYPE,
         data: &[u8],
@@ -391,7 +424,7 @@ impl Card {
             self.tokens = None;
         }
         let mut started = false;
-        let result = self.with_session(slot, |p11, session| unsafe {
+        let result = self.with_session(slot, Some(generation), |p11, session| unsafe {
             let mut mechanism = CK_MECHANISM { mechanism, pParameter: null_mut(), ulParameterLen: 0 };
             check(p11.C_SignInit(session, &mut mechanism, key))?;
             started = true;
@@ -414,7 +447,7 @@ impl Card {
         result
     }
 
-    pub fn find(&mut self, slot: CK_SLOT_ID, template: &[Attr]) -> Result<Vec<u64>, CK_RV> {
+    pub fn find(&mut self, slot: CK_SLOT_ID, generation: u64, template: &[Attr]) -> Result<Vec<u64>, CK_RV> {
         // OpenSC only reads the template, the `*mut` is a C API wart.
         let mut raw: Vec<CK_ATTRIBUTE> = template
             .iter()
@@ -424,7 +457,7 @@ impl Card {
                 ulValueLen: a.value.len() as CK_ULONG,
             })
             .collect();
-        self.with_session(slot, |p11, session| unsafe {
+        self.with_session(slot, Some(generation), |p11, session| unsafe {
             check(p11.C_FindObjectsInit(session, raw.as_mut_ptr(), raw.len() as CK_ULONG))?;
             let mut found = Vec::new();
             let mut batch = [0; 32];
@@ -443,8 +476,14 @@ impl Card {
         })
     }
 
-    pub fn get_attrs(&mut self, slot: CK_SLOT_ID, object: CK_OBJECT_HANDLE, types: &[u64]) -> Result<Vec<AttrValue>, CK_RV> {
-        self.with_session(slot, |p11, session| {
+    pub fn get_attrs(
+        &mut self,
+        slot: CK_SLOT_ID,
+        generation: u64,
+        object: CK_OBJECT_HANDLE,
+        types: &[u64],
+    ) -> Result<Vec<AttrValue>, CK_RV> {
+        self.with_session(slot, Some(generation), |p11, session| {
             types.iter().map(|&ty| get_attr(p11, session, object, ty)).collect()
         })
     }

@@ -189,21 +189,31 @@ impl Daemon {
         Ok(())
     }
 
-    fn sign(&self, client: &Client, slot: CK_SLOT_ID, key: u64, mechanism: u64, data: &[u8]) -> Result<Vec<u8>, CK_RV> {
+    fn sign(
+        &self,
+        client: &Client,
+        slot: CK_SLOT_ID,
+        generation: u64,
+        key: u64,
+        mechanism: u64,
+        data: &[u8],
+    ) -> Result<Vec<u8>, CK_RV> {
         if !self.granted(client, slot) {
             return Err(CKR_USER_NOT_LOGGED_IN);
         }
         let (token, always_authenticate) = {
             let mut card = lock(&self.card);
-            (card.token(slot)?, card.always_authenticate(slot, key)?)
+            (card.token(slot)?, card.always_authenticate(slot, generation, key)?)
         };
         // TLS client authentication: the login was enough.
         if token.role == Role::Auth && !always_authenticate {
-            return lock(&self.card).sign(slot, key, mechanism, data, None);
+            return lock(&self.card).sign(slot, generation, key, mechanism, data, None);
         }
         let _dialog = lock(&self.dialog);
         let result = if always_authenticate {
-            self.with_pin(client, token, Purpose::Sign, |card, pin| card.sign(slot, key, mechanism, data, Some(pin)))
+            self.with_pin(client, token, Purpose::Sign, |card, pin| {
+                card.sign(slot, generation, key, mechanism, data, Some(pin))
+            })
         } else {
             // The card doesn't want PIN.QES again; still, no qualified
             // signature without the user saying so.
@@ -211,7 +221,7 @@ impl Daemon {
             let shown = Instant::now();
             let approved = self.dialogs.approve(&client.app, &token, Purpose::Sign);
             eprintln!("{client}: signature approval {}", outcome(&approved, shown));
-            approved.and_then(|()| lock(&self.card).sign(slot, key, mechanism, data, None))
+            approved.and_then(|()| lock(&self.card).sign(slot, generation, key, mechanism, data, None))
         };
         match &result {
             Ok(_) => eprintln!("{client}: signed with slot {slot}"),
@@ -428,16 +438,16 @@ impl Daemon {
             // Only valid as the first request; see `serve`.
             Request::Hello { .. } => Err(CKR_GENERAL_ERROR),
             Request::Tokens => lock(&self.card).tokens().map(Response::Tokens),
-            Request::Find { slot, mut template } => {
+            Request::Find { slot, generation, mut template } => {
                 // Private objects are visible once anyone logged in to the
                 // token; hide them from clients that haven't.
                 if !self.granted(client, slot) {
                     template.push(Attr { ty: CKA_PRIVATE, value: vec![CK_FALSE] });
                 }
-                lock(&self.card).find(slot, &template).map(Response::Objects)
+                lock(&self.card).find(slot, generation, &template).map(Response::Objects)
             }
-            Request::GetAttrs { slot, object, types } => {
-                lock(&self.card).get_attrs(slot, object, &types).map(Response::Attrs)
+            Request::GetAttrs { slot, generation, object, types } => {
+                lock(&self.card).get_attrs(slot, generation, object, &types).map(Response::Attrs)
             }
             Request::Login { slot } => self.login(client, slot).map(|()| Response::Ok),
             Request::Logout { slot } => {
@@ -447,8 +457,8 @@ impl Daemon {
                 Ok(Response::Ok)
             }
             Request::Mechanisms { slot } => lock(&self.card).mechanisms(slot).map(Response::Mechanisms),
-            Request::Sign { slot, key, mechanism, data } => self
-                .sign(client, slot, key, mechanism, &data)
+            Request::Sign { slot, generation, key, mechanism, data } => self
+                .sign(client, slot, generation, key, mechanism, &data)
                 .map(Response::Signature)
                 // The spec's code for "the user rejected the signature".
                 .map_err(|rv| if rv == CKR_FUNCTION_CANCELED { CKR_FUNCTION_REJECTED } else { rv }),

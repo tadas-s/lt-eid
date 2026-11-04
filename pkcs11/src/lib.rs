@@ -21,7 +21,7 @@
 
 #![allow(non_snake_case)]
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ffi::c_void;
 use std::os::unix::net::UnixStream;
 use std::sync::{Mutex, MutexGuard};
@@ -50,6 +50,10 @@ struct Session {
     slot: CK_SLOT_ID,
     /// The daemon's slot for the token, fixed when the session opens.
     token_slot: u64,
+    /// The token's generation when the session opened. When the daemon's
+    /// is another, the token was replaced (to applications) and the session
+    /// is gone, as with a card swap.
+    generation: u64,
     /// Results of the active search and how many were handed out.
     find: Option<(Vec<CK_OBJECT_HANDLE>, usize)>,
     sign: Option<SignOp>,
@@ -69,8 +73,9 @@ struct SignOp {
 struct State {
     sessions: HashMap<CK_SESSION_HANDLE, Session>,
     next_handle: CK_SESSION_HANDLE,
-    /// Our slots this application is logged in to.
-    logged_in: HashSet<CK_SLOT_ID>,
+    /// Our slots this application is logged in to, with the token
+    /// generation logged in to.
+    logged_in: HashMap<CK_SLOT_ID, u64>,
     /// Connection to the daemon, opened on first use.
     conn: Option<UnixStream>,
     /// Process that owns `conn`. A forked child must not share it.
@@ -200,12 +205,41 @@ fn token(state: &mut State, slot: CK_SLOT_ID) -> Option<Token> {
     tokens(state).into_iter().find(|(s, _)| *s == slot).map(|(_, token)| token)
 }
 
+/// Whether this application is logged in to the token of `session`.
+fn logged_in(state: &State, session: &Session) -> bool {
+    state.logged_in.get(&session.slot) == Some(&session.generation)
+}
+
 /// Forget this application's login to `slot`, here and in the daemon.
 fn log_out(state: &mut State, slot: CK_SLOT_ID, token_slot: u64) {
-    if state.logged_in.remove(&slot) {
+    if state.logged_in.remove(&slot).is_some() {
         // If the daemon is gone, so is its record of our login.
         let _ = call(state, &Request::Logout { slot: token_slot });
     }
+}
+
+/// The token in `slot` of `generation` is gone: end its sessions and the
+/// login to it, as OpenSC does when the card is swapped. The daemon knows
+/// already; applications notice by `CKR_SESSION_HANDLE_INVALID` and set
+/// the token up afresh (NSS asks `C_GetSessionInfo`).
+fn expire(state: &mut State, slot: CK_SLOT_ID, generation: u64) {
+    state.sessions.retain(|_, s| s.slot != slot || s.generation != generation);
+    if state.logged_in.get(&slot) == Some(&generation) {
+        state.logged_in.remove(&slot);
+    }
+}
+
+/// `request` for one that names the token of session `h` by its
+/// generation. If the daemon says it's not the current one, expire the
+/// session (see `expire`).
+fn session_request(state: &mut State, h: CK_SESSION_HANDLE, req: &Request) -> Result<Response, CK_RV> {
+    let result = request(state, req);
+    if result.as_ref().is_err_and(|&rv| rv == CKR_SESSION_HANDLE_INVALID) {
+        if let Some(session) = state.sessions.get(&h) {
+            expire(state, session.slot, session.generation);
+        }
+    }
+    result
 }
 
 /// PKCS#11 strings are fixed-size, blank-padded and not NUL-terminated.
@@ -324,7 +358,7 @@ pub unsafe extern "C" fn C_Initialize(pInitArgs: *mut c_void) -> CK_RV {
     *guard = Some(State {
         sessions: HashMap::new(),
         next_handle: 1,
-        logged_in: HashSet::new(),
+        logged_in: HashMap::new(),
         conn: None,
         pid: std::process::id(),
     });
@@ -593,7 +627,8 @@ pub unsafe extern "C" fn C_OpenSession(
         };
         let handle = state.next_handle;
         state.next_handle += 1;
-        let session = Session { flags, slot: slotID, token_slot: token.slot, find: None, sign: None };
+        let session =
+            Session { flags, slot: slotID, token_slot: token.slot, generation: token.generation, find: None, sign: None };
         state.sessions.insert(handle, session);
         unsafe { *phSession = handle };
         CKR_OK
@@ -647,10 +682,19 @@ pub unsafe extern "C" fn C_GetSessionInfo(
         let Some(session) = state.sessions.get(&hSession) else {
             return CKR_SESSION_HANDLE_INVALID;
         };
+        // Applications ask this to learn whether the token is still the one
+        // they set up (NSS does, every so often): a removed or replaced
+        // token ends the session.
+        let (slot, generation) = (session.slot, session.generation);
+        if token(state, slot).is_none_or(|token| token.generation != generation) {
+            expire(state, slot, generation);
+            return CKR_SESSION_HANDLE_INVALID;
+        }
+        let session = &state.sessions[&hSession];
         let rw = session.flags & CKF_RW_SESSION != 0;
         let info = CK_SESSION_INFO {
             slotID: session.slot,
-            state: match (rw, state.logged_in.contains(&session.slot)) {
+            state: match (rw, logged_in(state, session)) {
                 (false, false) => CKS_RO_PUBLIC_SESSION,
                 (false, true) => CKS_RO_USER_FUNCTIONS,
                 (true, false) => CKS_RW_PUBLIC_SESSION,
@@ -675,7 +719,7 @@ pub unsafe extern "C" fn C_Login(
         let Some(session) = state.sessions.get(&hSession) else {
             return CKR_SESSION_HANDLE_INVALID;
         };
-        let (slot, token_slot) = (session.slot, session.token_slot);
+        let (slot, token_slot, generation) = (session.slot, session.token_slot, session.generation);
         match userType {
             CKU_USER => {}
             // Re-authentication for the signature being made. The daemon
@@ -684,7 +728,7 @@ pub unsafe extern "C" fn C_Login(
             CKU_CONTEXT_SPECIFIC => return CKR_OPERATION_NOT_INITIALIZED,
             _ => return CKR_USER_TYPE_INVALID,
         }
-        if state.logged_in.contains(&slot) {
+        if logged_in(state, session) {
             return CKR_USER_ALREADY_LOGGED_IN;
         }
         // A PIN passed in anyway is ignored: PINs go to the card only
@@ -695,7 +739,7 @@ pub unsafe extern "C" fn C_Login(
             Ok(_) => return CKR_DEVICE_ERROR,
             Err(rv) => return rv,
         }
-        state.logged_in.insert(slot);
+        state.logged_in.insert(slot, generation);
         CKR_OK
     })
 }
@@ -706,10 +750,10 @@ pub unsafe extern "C" fn C_Logout(hSession: CK_SESSION_HANDLE) -> CK_RV {
         let Some(session) = state.sessions.get(&hSession) else {
             return CKR_SESSION_HANDLE_INVALID;
         };
-        let (slot, token_slot) = (session.slot, session.token_slot);
-        if !state.logged_in.contains(&slot) {
+        if !logged_in(state, session) {
             return CKR_USER_NOT_LOGGED_IN;
         }
+        let (slot, token_slot) = (session.slot, session.token_slot);
         log_out(state, slot, token_slot);
         CKR_OK
     })
@@ -754,17 +798,16 @@ pub unsafe extern "C" fn C_FindObjectsInit(
         Err(rv) => return rv,
     };
     with_state(|state| {
-        let slot = match state.sessions.get(&hSession) {
+        let (slot, generation) = match state.sessions.get(&hSession) {
             None => return CKR_SESSION_HANDLE_INVALID,
             Some(session) if session.find.is_some() => return CKR_OPERATION_ACTIVE,
-            Some(session) => session.token_slot,
+            Some(session) => (session.token_slot, session.generation),
         };
-        let found = match request(state, &Request::Find { slot, template }) {
+        let found = match session_request(state, hSession, &Request::Find { slot, generation, template }) {
             Ok(Response::Objects(found)) => found,
             Ok(_) => return CKR_DEVICE_ERROR,
             Err(rv) => return rv,
         };
-        // The session can't vanish meanwhile: we hold the state lock.
         if let Some(session) = state.sessions.get_mut(&hSession) {
             session.find = Some((found, 0));
         }
@@ -823,11 +866,12 @@ pub unsafe extern "C" fn C_GetAttributeValue(
         unsafe { std::slice::from_raw_parts_mut(pTemplate, ulCount as usize) }
     };
     with_state(|state| {
-        let Some(slot) = state.sessions.get(&hSession).map(|s| s.token_slot) else {
+        let Some((slot, generation)) = state.sessions.get(&hSession).map(|s| (s.token_slot, s.generation)) else {
             return CKR_SESSION_HANDLE_INVALID;
         };
         let types = template.iter().map(|a| a.type_).collect();
-        let values = match request(state, &Request::GetAttrs { slot, object: hObject, types }) {
+        let req = Request::GetAttrs { slot, generation, object: hObject, types };
+        let values = match session_request(state, hSession, &req) {
             Ok(Response::Attrs(values)) if values.len() == template.len() => values,
             Ok(_) => return CKR_DEVICE_ERROR,
             Err(rv) => return rv,
@@ -890,10 +934,11 @@ pub unsafe extern "C" fn C_SignInit(
     }
     let mechanism = unsafe { &*pMechanism };
     with_state(|state| {
-        let (slot, token_slot) = match state.sessions.get(&hSession) {
+        let (token_slot, generation) = match state.sessions.get(&hSession) {
             None => return CKR_SESSION_HANDLE_INVALID,
             Some(session) if session.sign.is_some() => return CKR_OPERATION_ACTIVE,
-            Some(session) => (session.slot, session.token_slot),
+            Some(session) if !logged_in(state, session) => return CKR_USER_NOT_LOGGED_IN,
+            Some(session) => (session.token_slot, session.generation),
         };
         if !MECHANISMS.contains(&mechanism.mechanism) {
             return CKR_MECHANISM_INVALID;
@@ -901,12 +946,10 @@ pub unsafe extern "C" fn C_SignInit(
         if !mechanism.pParameter.is_null() || mechanism.ulParameterLen != 0 {
             return CKR_MECHANISM_PARAM_INVALID;
         }
-        if !state.logged_in.contains(&slot) {
-            return CKR_USER_NOT_LOGGED_IN;
-        }
         // Check the key now, so a bad one fails here and not at C_Sign.
         let types = vec![CKA_CLASS, CKA_KEY_TYPE, CKA_SIGN];
-        let attrs = match request(state, &Request::GetAttrs { slot: token_slot, object: hKey, types }) {
+        let req = Request::GetAttrs { slot: token_slot, generation, object: hKey, types };
+        let attrs = match session_request(state, hSession, &req) {
             Ok(Response::Attrs(attrs)) if attrs.len() == 3 => attrs,
             Ok(_) => return CKR_DEVICE_ERROR,
             Err(CKR_OBJECT_HANDLE_INVALID) => return CKR_KEY_HANDLE_INVALID,
@@ -950,14 +993,17 @@ fn finish_sign(
             op.message.extend_from_slice(last);
             let req = Request::Sign {
                 slot: session.token_slot,
+                generation: session.generation,
                 key: op.key,
                 mechanism: CKM_ECDSA,
                 data: to_be_signed(op.mechanism, &op.message),
             };
             let slot = session.slot;
-            let result = request(state, &req);
-            // The session can't vanish meanwhile: we hold the state lock.
-            let session = state.sessions.get_mut(&hSession).expect("session");
+            let result = session_request(state, hSession, &req);
+            // Gone if the token was replaced (see `session_request`).
+            let Some(session) = state.sessions.get_mut(&hSession) else {
+                return CKR_SESSION_HANDLE_INVALID;
+            };
             match result {
                 Ok(Response::Signature(signature)) => {
                     session.sign.as_mut().expect("sign op").signature = Some(signature.clone());
