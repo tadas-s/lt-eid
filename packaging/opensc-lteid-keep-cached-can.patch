@@ -1,0 +1,88 @@
+From 912e8e419c6823ed7b721e0e51620ff6087d2ad9 Mon Sep 17 00:00:00 2001
+From: Tadas Sasnauskas <tadas@yoyo.lt>
+Date: Fri, 6 Nov 2026 10:39:01 +0200
+Subject: [PATCH] lteid: never delete the cached CAN
+
+The driver deleted the cached CAN whenever PACE with it failed, so that
+a wrong CAN would not be retried. It also did so on reader errors, such
+as a card pulled out or a bad contact half way through PACE, and every
+later insertion asked for the CAN again. A wrong CAN doesn't block the
+card, so the cache needn't be cleared: drop it (and can_from_cache,
+which only served it). A new CAN replaces the cached one when it works.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/libopensc/card-lteid.c | 29 -----------------------------
+ 1 file changed, 29 deletions(-)
+
+diff --git a/src/libopensc/card-lteid.c b/src/libopensc/card-lteid.c
+index a582eb7b9..bd0dbd33f 100644
+--- a/src/libopensc/card-lteid.c
++++ b/src/libopensc/card-lteid.c
+@@ -43,7 +43,6 @@ struct lteid_drv_data {
+ 	unsigned char pace;
+ 	unsigned char pace_pin_ref;
+ 	unsigned char can[LTEID_CAN_LENGTH];
+-	unsigned char can_from_cache;
+ };
+ 
+ void
+@@ -110,22 +109,6 @@ lteid_cache_can(sc_card_t *card, const char *can)
+ 	return SC_SUCCESS;
+ }
+ 
+-static int
+-lteid_clear_cached_can(sc_card_t *card)
+-{
+-	SC_FUNC_CALLED(card->ctx, SC_LOG_DEBUG_VERBOSE);
+-
+-	char path[PATH_MAX];
+-
+-	lteid_get_can_cache_path(card, path, sizeof(path));
+-
+-	if (!unlink(path)) {
+-		LOG_FUNC_RETURN(card->ctx, SC_ERROR_INTERNAL);
+-	}
+-
+-	LOG_FUNC_RETURN(card->ctx, SC_SUCCESS);
+-}
+-
+ static int
+ lteid_get_can(sc_card_t *card, struct establish_pace_channel_input *pace_input)
+ {
+@@ -133,8 +116,6 @@ lteid_get_can(sc_card_t *card, struct establish_pace_channel_input *pace_input)
+ 	struct lteid_drv_data *drv_data = DRVDATA(card);
+ 	int got_can = 0;
+ 
+-	drv_data->can_from_cache = 0;
+-
+ 	// Try env variables first
+ 	const char *can_from_env = getenv("LTEID_CAN");
+ 	if (can_from_env && strlen(can_from_env) == LTEID_CAN_LENGTH) {
+@@ -145,7 +126,6 @@ lteid_get_can(sc_card_t *card, struct establish_pace_channel_input *pace_input)
+ 	// Try getting one from the cache
+ 	if (!got_can && lteid_get_cached_can(card, drv_data->can)) {
+ 		got_can = 1;
+-		drv_data->can_from_cache = 1;
+ 	}
+ 
+ 	// Finally see if there is a default in configuration
+@@ -217,15 +197,6 @@ lteid_perform_pace(struct sc_card *card, const int ref, const unsigned char *pin
+ 			rv = SC_ERROR_AUTH_METHOD_BLOCKED;
+ 		}
+ 
+-		// When CAN code authentication fails and CAN code comes from cache - clear it.
+-		// We don't want to make multiple attempts if code is wrong. User should run lteid-tool
+-		// again to set up the card.
+-		if (ref == PACE_PIN_ID_CAN && drv_data->can_from_cache && rv != SC_ERROR_INTERNAL) {
+-			if (lteid_clear_cached_can(card)) {
+-				drv_data->can_from_cache = 0;
+-			}
+-		}
+-
+ 		LOG_FUNC_RETURN(card->ctx, rv);
+ 	}
+ 
+-- 
+2.56.0
+

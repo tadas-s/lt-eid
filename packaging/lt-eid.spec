@@ -27,6 +27,8 @@ Patch0:         opensc-static-libopensc.patch
 Patch1:         opensc-pcsc-card-replaced.patch
 # lteid-tool --new-pin, so lt-eidd can change the PIN.
 Patch2:         opensc-lteid-tool-new-pin.patch
+# The lteid driver never deletes the cached CAN.
+Patch3:         opensc-lteid-keep-cached-can.patch
 
 ExclusiveArch:  %{rust_arches}
 
@@ -68,6 +70,7 @@ mv opensc-0.27.1 opensc
 %patch -P0 -p1 -d opensc
 %patch -P1 -p1 -d opensc
 %patch -P2 -p1 -d opensc
+%patch -P3 -p1 -d opensc
 mkdir -p .cargo
 cat > .cargo/config.toml <<'EOF'
 [source.crates-io]
@@ -174,6 +177,8 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 - Desktop entry renamed "Change Lithuanian eID PIN", with the lt-eid icon
 - Dialogs have headings ("PIN changed", "Allow eID use", ...) instead of
   pinentry's "Message"
+- Bundled OpenSC: the cached CAN is kept when PACE fails, e.g. on a bad
+  contact or a card pulled out
 
 * Tue Nov 03 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-13
 - Change the PIN (eID PIN and PIN.QES together) with lt-eid change-pin, or
