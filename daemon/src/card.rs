@@ -4,7 +4,7 @@
 //! OpenSC is driven through raw `C_*` calls: attribute values and `CK_RV`
 //! codes pass through to clients unchanged.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::c_void;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -23,9 +23,17 @@ fn text(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).trim_end_matches([' ', '\0']).to_owned()
 }
 
-/// OpenSC labels each token "<holder name> (<PIN name>)".
-fn role(label: &str) -> Role {
-    if label.ends_with("(PIN.QES)") { Role::Qes } else { Role::Auth }
+/// OpenSC labels each token "<holder name> (<PIN name>)", with the PIN's
+/// name as the card has it. `None` for a PIN that is neither of the two a
+/// Lithuanian eID has.
+fn role(label: &str) -> Option<Role> {
+    if label.ends_with("(PACE-PIN)") {
+        Some(Role::Auth)
+    } else if label.ends_with("(PIN.QES)") {
+        Some(Role::Qes)
+    } else {
+        None
+    }
 }
 
 /// What a PIN change changed. The card has two PINs that are one to the
@@ -86,6 +94,9 @@ pub struct Card {
     /// change when the card goes or comes (see `forget_tokens`), or with a
     /// PIN attempt.
     tokens: Option<Vec<Token>>,
+    /// Labels of tokens left out for their unknown PIN (see `role`), to log
+    /// each once and not on every listing. Forgotten with the tokens.
+    unsupported: HashSet<String>,
     /// Bumped whenever object handles and logins become invalid (see
     /// `Token::generation`). OpenSC's object handles are pointers, so a
     /// handle from before could even name another object now.
@@ -105,6 +116,7 @@ impl Card {
             logins: HashMap::new(),
             last_login: 0,
             tokens: None,
+            unsupported: HashSet::new(),
             // Not one an earlier daemon used: OpenSC starts afresh.
             generation: SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64),
         })
@@ -140,6 +152,7 @@ impl Card {
     /// Object handles and logins from before are invalid now.
     fn renew(&mut self) {
         self.tokens = None;
+        self.unsupported.clear();
         self.generation += 1;
     }
 
@@ -262,9 +275,15 @@ impl Card {
                 continue;
             }
             let label = text(&info.label);
+            let Some(role) = role(&label) else {
+                if self.unsupported.insert(label.clone()) {
+                    eprintln!("slot {slot}: token {label:?} is for neither PACE-PIN nor PIN.QES, leaving it out");
+                }
+                continue;
+            };
             tokens.push(Token {
                 slot,
-                role: role(&label),
+                role,
                 label,
                 manufacturer: text(&info.manufacturerID),
                 model: text(&info.model),
@@ -504,4 +523,17 @@ fn get_attr(p11: &Pkcs11, session: CK_SESSION_HANDLE, object: CK_OBJECT_HANDLE, 
     check(unsafe { p11.C_GetAttributeValue(session, object, &mut attr, 1) })?;
     value.truncate(attr.ulValueLen as usize);
     Ok(AttrValue::Value(value))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn role_from_token_label() {
+        assert_eq!(role("VARDENIS PAVARDENIS (PACE-PIN)"), Some(Role::Auth));
+        assert_eq!(role("VARDENIS PAVARDENIS (PIN.QES)"), Some(Role::Qes));
+        assert_eq!(role("VARDENIS PAVARDENIS (User PIN)"), None);
+        assert_eq!(role("Test eID"), None);
+    }
 }

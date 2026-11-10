@@ -29,7 +29,7 @@ connection to the card, so PACE runs once and clients never fight over it.
 
 - Two fixed slots: 0 is the authentication token ("PACE-PIN"), 1 the
   qualified signature token ("PIN.QES"). The daemon tells them apart by the
-  OpenSC token label.
+  OpenSC token label, and leaves out tokens for any other PIN.
 - Slot and token info, object search, `C_GetAttributeValue`, login and
   signing go to the daemon. Other crypto (verify, decrypt, ...) returns
   `CKR_FUNCTION_NOT_SUPPORTED`.
@@ -197,10 +197,12 @@ so that it installs no `libopensc.so` and stays out of the system OpenSC's way.
 
 ### Without a card
 
-Any PKCS#11 module can stand in for OpenSC, e.g. SoftHSM:
+Any PKCS#11 module can stand in for OpenSC, e.g. SoftHSM. The daemon only
+takes tokens labelled like the card's, ending in "(PACE-PIN)" or "(PIN.QES)":
 
     export SOFTHSM2_CONF=/path/to/softhsm2.conf LT_EID_SOCKET=/tmp/lt-eid-test.sock
-    softhsm2-util --init-token --free --label "Test eID" --pin 123456 --so-pin 12345678
+    softhsm2-util --init-token --free --label "Test eID (PACE-PIN)" --pin 123456 --so-pin 12345678
+    softhsm2-util --init-token --free --label "Test eID (PIN.QES)" --pin 123456 --so-pin 12345678
     target/release/lt-eidd /usr/lib64/pkcs11/libsofthsm2.so &
     pkcs11-tool --module $M -O
 
