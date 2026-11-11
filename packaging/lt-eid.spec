@@ -48,7 +48,7 @@ BuildRequires:  systemd-rpm-macros
 Requires:       pcsc-lite
 Requires:       pcsc-lite-libs%{?_isa}
 Requires:       pinentry
-Recommends:     pinentry-gnome3
+Requires:       pinentry-gui
 Requires:       p11-kit
 
 Provides:       bundled(opensc) = %{opensc_version}
@@ -174,6 +174,8 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 - Bundled OpenSC updated to master 768a7b0fa
 - Only tokens for the card's two PINs (PACE-PIN, PIN.QES) are offered; one
   for any other PIN is left out and logged
+- Requires any graphical pinentry (pinentry-gui) instead of recommending
+  pinentry-gnome3, so that KDE keeps to pinentry-qt
 - No minimum openpace version any more: the trouble with some versions only
   shows with OpenSC loaded into Firefox, which lt-eid doesn't do
 
