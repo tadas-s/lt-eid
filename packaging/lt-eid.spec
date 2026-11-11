@@ -2,8 +2,8 @@
 
 %global ltdir /opt/lt-eid
 
-%global opensc_commit 58e466043
-%global opensc_snapdate 20261021
+%global opensc_commit 768a7b0fa
+%global opensc_snapdate 20261110
 %global opensc_version 0.27.1^%{opensc_snapdate}git%{opensc_commit}
 
 # Everything under /opt/lt-eid is private: provide nothing to other packages.
@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        14%{?dist}
+Release:        15%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -171,6 +171,11 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/icons/hicolor/scalable/apps/lt-eid.svg
 
 %changelog
+* Wed Nov 11 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-15
+- Bundled OpenSC updated to master 768a7b0fa
+- Only tokens for the card's two PINs (PACE-PIN, PIN.QES) are offered; one
+  for any other PIN is left out and logged
+
 * Wed Nov 04 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-14
 - Applications see a new token after a PIN change, a CAN or a PIN resume
   (the daemon's OpenSC restarts); Firefox no longer needs a restart
