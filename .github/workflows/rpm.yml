@@ -1,5 +1,7 @@
-# Build the lt-eid RPM on Fedora. Every run uploads each RPM as a workflow
-# artifact; a pushed v* tag (e.g. v0.1.0-5) also attaches them to a release.
+# Build the lt-eid RPM on each Fedora release listed below. Every run uploads
+# each RPM as a workflow artifact; a pushed v* tag (e.g. v0.1.0-5) also
+# attaches them to a release. The file names tell the Fedora releases apart
+# (fc44, fc45).
 name: RPM
 
 on:
@@ -14,8 +16,14 @@ permissions:
 
 jobs:
   build:
+    name: Fedora ${{ matrix.fedora }}
+    strategy:
+      # A failure on one Fedora release still shows how the others do.
+      fail-fast: false
+      matrix:
+        fedora: [44, 45]
     runs-on: ubuntu-latest
-    container: fedora:44
+    container: fedora:${{ matrix.fedora }}
     steps:
       - name: Install build tools
         run: dnf -y install git rpm-build rpmdevtools dnf5-plugins rust-srpm-macros systemd-rpm-macros
