@@ -41,13 +41,12 @@ BuildRequires:  pcsc-lite-devel
 BuildRequires:  openssl-devel
 BuildRequires:  readline-devel
 BuildRequires:  zlib-ng-devel
-BuildRequires:  openpace-devel >= 1.1.3
+BuildRequires:  openpace-devel
 BuildRequires:  systemd-rpm-macros
 
 # OpenSC loads libpcsclite with dlopen(), so no automatic dependency.
 Requires:       pcsc-lite
 Requires:       pcsc-lite-libs%{?_isa}
-Requires:       openpace%{?_isa} >= 1.1.3
 Requires:       pinentry
 Recommends:     pinentry-gnome3
 Requires:       p11-kit
@@ -175,6 +174,8 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 - Bundled OpenSC updated to master 768a7b0fa
 - Only tokens for the card's two PINs (PACE-PIN, PIN.QES) are offered; one
   for any other PIN is left out and logged
+- No minimum openpace version any more: the trouble with some versions only
+  shows with OpenSC loaded into Firefox, which lt-eid doesn't do
 
 * Wed Nov 04 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-14
 - Applications see a new token after a PIN change, a CAN or a PIN resume
