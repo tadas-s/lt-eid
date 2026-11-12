@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+#DEBHELPER#
+
+# A user manager that is already running doesn't see the units just enabled,
+# and a login it outlives would not start them.
+if [ "$1" = configure ] && [ -d /run/systemd/system ]; then
+	SYSTEMD_BUS_TIMEOUT=15s systemctl reload 'user@*.service' || true
+fi

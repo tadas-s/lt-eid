@@ -11,7 +11,7 @@
 
 Name:           lt-eid
 Version:        0.1.0
-Release:        15%{?dist}
+Release:        16%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -137,6 +137,8 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 
 %post
 %systemd_user_post lt-eidd.socket lt-eidd.service lt-eid-signing-server.socket lt-eid-signing-server.service
+# Or a user manager that is already running doesn't see the units enabled.
+%systemd_user_daemon_reexec
 
 %preun
 %systemd_user_preun lt-eidd.socket lt-eidd.service lt-eid-signing-server.socket lt-eid-signing-server.service
@@ -170,6 +172,10 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/icons/hicolor/scalable/apps/lt-eid.svg
 
 %changelog
+* Thu Nov 12 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-16
+- Installing reloads the user managers already running: one that outlived a
+  logout didn't see the units enabled, and the next login didn't start lt-eidd
+
 * Wed Nov 11 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-15
 - Bundled OpenSC updated to master 768a7b0fa
 - Only tokens for the card's two PINs (PACE-PIN, PIN.QES) are offered; one
