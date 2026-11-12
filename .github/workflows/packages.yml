@@ -52,18 +52,11 @@ jobs:
           cp "$(rpm --eval %_rpmdir)"/*/*.rpm rpms/
           ls -l rpms
 
-      # Uploaded as-is, not zipped: one file per upload, named after it.
+      # Uploaded as-is, not zipped, and named after the file. The debuginfo
+      # and debugsource packages are built too, but not kept.
       - uses: actions/upload-artifact@v7
         with:
           path: rpms/lt-eid-[0-9]*.x86_64.rpm
-          archive: false
-      - uses: actions/upload-artifact@v7
-        with:
-          path: rpms/lt-eid-debuginfo-*.rpm
-          archive: false
-      - uses: actions/upload-artifact@v7
-        with:
-          path: rpms/lt-eid-debugsource-*.rpm
           archive: false
 
   deb:
@@ -96,14 +89,11 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           OPENSC_SRC="$RUNNER_TEMP/OpenSC" packaging/make-deb.sh
 
-      # Uploaded as-is, not zipped: one file per upload, named after it.
+      # Uploaded as-is, not zipped, and named after the file. The debug
+      # symbols package (.ddeb) is built too, but not kept.
       - uses: actions/upload-artifact@v7
         with:
           path: target/deb/lt-eid_*.deb
-          archive: false
-      - uses: actions/upload-artifact@v7
-        with:
-          path: target/deb/lt-eid-dbgsym_*.ddeb
           archive: false
 
   release:
