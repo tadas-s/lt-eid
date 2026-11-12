@@ -1,0 +1,39 @@
+Source: lt-eid
+Section: utils
+Priority: optional
+Maintainer: Tadas Sasnauskas <tadas@yoyo.lt>
+Homepage: https://github.com/tadas-s/lt-eid
+Rules-Requires-Root: no
+Standards-Version: 4.7.0
+# Ubuntu 24.04's own cargo is too old; make-deb.sh finds the newer one.
+Build-Depends: debhelper-compat (= 13),
+               cargo (>= 1.88) | cargo-1.97,
+               autoconf,
+               automake,
+               libtool,
+               pkgconf,
+               libpcsclite-dev,
+               libssl-dev,
+               libreadline-dev,
+               zlib1g-dev,
+               libeac-dev
+
+Package: lt-eid
+Architecture: any
+# pcscd is its own package here, and OpenSC loads libpcsclite with dlopen().
+# /usr/bin/pinentry is whichever pinentry is installed; lt-eidd has no
+# terminal, so it must be a graphical one.
+Depends: ${shlibs:Depends},
+         ${misc:Depends},
+         pcscd,
+         libpcsclite1,
+         pinentry-gnome3 | pinentry-x11,
+         p11-kit-modules
+Description: Lithuanian eID card access through one central daemon
+ Applications (browsers, signing tools) load a small PKCS#11 module that
+ forwards to lt-eidd, a per-user daemon. The daemon owns the only connection
+ to the Lithuanian eID card through a private OpenSC build, asks for PINs
+ itself and lets applications use the card only with the user's approval.
+ .
+ lt-eid-signing-server stands in for Elpako Signer, the local web service
+ Elpako-based sites (epaslaugos.lt) use to log in with the eID.

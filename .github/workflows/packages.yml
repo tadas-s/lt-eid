@@ -1,8 +1,9 @@
-# Build the lt-eid RPM on each Fedora release listed below. Every run uploads
-# each RPM as a workflow artifact; a pushed v* tag (e.g. v0.1.0-5) also
-# attaches them to a release. The file names tell the Fedora releases apart
-# (fc44, fc45).
-name: RPM
+# Build the lt-eid packages: an RPM on each Fedora release and a .deb on each
+# Ubuntu release listed below. Every run uploads each package as a workflow
+# artifact; a pushed v* tag (e.g. v0.1.0-5) also attaches them to a release.
+# The file names tell the releases apart (fc44, fc45, ubuntu24.04,
+# ubuntu26.04).
+name: Packages
 
 on:
   push:
@@ -15,7 +16,7 @@ permissions:
   contents: read
 
 jobs:
-  build:
+  rpm:
     name: Fedora ${{ matrix.fedora }}
     strategy:
       # A failure on one Fedora release still shows how the others do.
@@ -69,20 +70,60 @@ jobs:
           path: rpms/*.src.rpm
           archive: false
 
+  deb:
+    name: Ubuntu ${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ubuntu: ["24.04", "26.04"]
+    runs-on: ubuntu-latest
+    container: ubuntu:${{ matrix.ubuntu }}
+    env:
+      DEBIAN_FRONTEND: noninteractive
+    steps:
+      - name: Install build tools
+        run: |
+          apt-get update
+          apt-get -y install git ca-certificates
+
+      - uses: actions/checkout@v5
+
+      - name: Install build dependencies
+        run: apt-get -y build-dep ./packaging
+
+      # make-deb.sh takes the OpenSC snapshot from a git tree.
+      - name: Fetch OpenSC
+        run: git clone --filter=blob:none --no-checkout https://github.com/OpenSC/OpenSC.git "$RUNNER_TEMP/OpenSC"
+
+      - name: Build
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          OPENSC_SRC="$RUNNER_TEMP/OpenSC" packaging/make-deb.sh
+
+      # Uploaded as-is, not zipped: one file per upload, named after it.
+      - uses: actions/upload-artifact@v7
+        with:
+          path: target/deb/lt-eid_*.deb
+          archive: false
+      - uses: actions/upload-artifact@v7
+        with:
+          path: target/deb/lt-eid-dbgsym_*.ddeb
+          archive: false
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: build
+    needs: [rpm, deb]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      # Every artifact of the run is a package.
       - uses: actions/download-artifact@v8
         with:
-          pattern: "*.rpm"
           merge-multiple: true
-          path: rpms
+          path: packages
 
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" rpms/*.rpm --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" packages/* --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes

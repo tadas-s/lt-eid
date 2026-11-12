@@ -1,0 +1,31 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: lt-eid
+Source: https://github.com/tadas-s/lt-eid
+
+Files: *
+Copyright: Tadas Sasnauskas
+License: LGPL-2.1+
+
+Files: opensc/*
+Copyright: the OpenSC authors
+License: LGPL-2.1+ and BSD-3-Clause
+Comment:
+ A snapshot of https://github.com/OpenSC/OpenSC, built into
+ /opt/lt-eid/lib/opensc-pkcs11.so and the tools in /opt/lt-eid/bin. Its
+ COPYING file is installed as /usr/share/doc/lt-eid/COPYING.opensc.
+
+Files: vendor/*
+Copyright: the authors of each crate
+License: Apache-2.0 and ISC and MIT and (MIT or Apache-2.0) and (Unlicense or MIT)
+Comment:
+ Rust crates compiled into the programs. Each crate's directory has its
+ license texts; /usr/share/doc/lt-eid/cargo-licenses.txt has the tally.
+
+License: LGPL-2.1+
+ This library is free software; you can redistribute it and/or modify it
+ under the terms of the GNU Lesser General Public License as published by
+ the Free Software Foundation; either version 2.1 of the License, or (at
+ your option) any later version.
+ .
+ On Debian systems, the complete text of the GNU Lesser General Public
+ License version 2.1 can be found in /usr/share/common-licenses/LGPL-2.1.

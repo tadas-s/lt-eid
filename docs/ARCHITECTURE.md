@@ -195,6 +195,18 @@ so that it installs no `libopensc.so` and stays out of the system OpenSC's way.
     packaging/make-sources.sh      # this tree, vendored crates, OpenSC patch
     rpmbuild -bb packaging/lt-eid.spec
 
+### Ubuntu package
+
+`packaging/make-deb.sh` builds the same files into a `.deb` for the Ubuntu
+release it runs on, with `packaging/debian/`. The version, the OpenSC commit
+and its patches are read from the spec.
+
+    sudo apt-get build-dep ./packaging
+    packaging/make-deb.sh          # packages in target/deb
+
+The package is versioned after the release (`0.1.0-15~ubuntu24.04`). It has
+no preset: its install script enables the same units for every user.
+
 ### Without a card
 
 Any PKCS#11 module can stand in for OpenSC, e.g. SoftHSM. The daemon only

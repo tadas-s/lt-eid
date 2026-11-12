@@ -1,0 +1,76 @@
+#!/usr/bin/make -f
+# For a tree prepared by packaging/make-deb.sh: OpenSC, patched, in opensc/
+# and the Rust crates in vendor/. What is built and where it goes is the
+# same as in packaging/lt-eid.spec.
+
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all
+
+ltdir = /opt/lt-eid
+root = debian/lt-eid
+r = $(root)$(ltdir)
+tools = opensc-tool opensc-explorer pkcs11-tool pkcs15-tool lteid-tool
+units = $(root)/usr/lib/systemd/user
+
+%:
+	dh $@ --without autoreconf
+
+override_dh_auto_configure:
+	cd opensc && autoreconf -fi
+	dh_auto_configure --sourcedirectory=opensc -- \
+	  --prefix=$(ltdir) \
+	  --libdir=$(ltdir)/lib \
+	  --sysconfdir=$(ltdir)/etc \
+	  --enable-p11_system_config_modules=$(ltdir)/share/p11-kit/modules \
+	  --with-completiondir=$(ltdir)/share/bash-completion/completions \
+	  --disable-doc \
+	  --disable-notify \
+	  --disable-autostart-items \
+	  --disable-tests \
+	  --enable-pcsc \
+	  --enable-sm
+
+override_dh_auto_build:
+	dh_auto_build --sourcedirectory=opensc
+	cargo build --release --offline --locked
+
+# The tree is made for one build and thrown away.
+override_dh_auto_clean:
+
+# dh_clean would delete the *.orig files of the vendored crates, and cargo
+# checks each crate's files against its checksums.
+override_dh_clean:
+	dh_clean -X.orig
+
+override_dh_auto_test:
+
+override_dh_auto_install:
+	# OpenSC, pruned to the PKCS#11 module and the tools worth having.
+	dh_auto_install --sourcedirectory=opensc --destdir=$(root)
+	find $(r)/lib -mindepth 1 -maxdepth 1 ! -name opensc-pkcs11.so -exec rm -rf {} +
+	for f in $(r)/bin/* $(r)/share/bash-completion/completions/*; do \
+	  case " $(tools) " in *" $$(basename $$f) "*) ;; *) rm -f $$f ;; esac; \
+	done
+	rm -rf $(r)/share/opensc $(r)/share/applications $(r)/share/p11-kit $(r)/share/doc $(r)/share/man
+	# Terminal certificates for the German eID (EAC); the Lithuanian card needs none.
+	rm -rf $(root)/etc
+	install -pm 0644 packaging/opensc.conf $(r)/etc/opensc.conf
+
+	install -Dpm 0755 target/release/lt-eidd $(r)/bin/lt-eidd
+	install -Dpm 0755 target/release/lt-eid-signing-server $(r)/bin/lt-eid-signing-server
+	install -Dpm 0755 target/release/lt-eid $(r)/bin/lt-eid
+	# Cargo names it lib<crate>.so; install it under the name it is known by.
+	install -Dpm 0755 target/release/liblt_eid_pkcs11.so $(r)/lib/lt-eid-pkcs11.so
+
+	install -Dpm 0644 -t $(units) systemd/lt-eidd.socket systemd/lt-eidd.service \
+	  systemd/lt-eid-signing-server.socket systemd/lt-eid-signing-server.service
+	install -Dpm 0644 packaging/lt-eid.module $(root)/usr/share/p11-kit/modules/lt-eid.module
+	install -Dpm 0644 packaging/lt-eid-change-pin.desktop $(root)/usr/share/applications/lt-eid-change-pin.desktop
+	install -Dpm 0644 packaging/lt-eid.svg $(root)/usr/share/icons/hicolor/scalable/apps/lt-eid.svg
+
+	cp -p opensc/COPYING COPYING.opensc
+	cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-licenses.txt
+
+# Enabled for every user, as the preset does on Fedora: lt-eidd runs in the
+# desktop session, the signing server starts on demand through its socket.
+override_dh_installsystemduser:
+	dh_installsystemduser lt-eidd.socket lt-eidd.service lt-eid-signing-server.socket
