@@ -44,12 +44,12 @@ jobs:
           OPENSC_SRC="$RUNNER_TEMP/OpenSC" packaging/make-sources.sh
 
       - name: Build
-        run: rpmbuild -ba packaging/lt-eid.spec
+        run: rpmbuild -bb packaging/lt-eid.spec
 
       - name: Collect RPMs
         run: |
           mkdir rpms
-          cp "$(rpm --eval %_rpmdir)"/*/*.rpm "$(rpm --eval %_srcrpmdir)"/*.rpm rpms/
+          cp "$(rpm --eval %_rpmdir)"/*/*.rpm rpms/
           ls -l rpms
 
       # Uploaded as-is, not zipped: one file per upload, named after it.
@@ -64,10 +64,6 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           path: rpms/lt-eid-debugsource-*.rpm
-          archive: false
-      - uses: actions/upload-artifact@v7
-        with:
-          path: rpms/*.src.rpm
           archive: false
 
   deb:
