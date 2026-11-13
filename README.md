@@ -13,10 +13,10 @@ kelioms programoms vienu metu
 
 # Kodėl?
 
-- Oficiali VRM pateikiama programa mCard Toolbox veikia prastai, atnaujinama retai
+- Oficiali VRM pateikiama programa [mCard Toolbox veikia prastai, atnaujinama retai](https://tadas-s.github.io/doc/lithuanian_electronic_identity_card/)
 - epaslaugos.lt reikalinga papildoma programinė įranga Elpako Signer Linux
 aplinkai padaryta atmestinai, veikia prastai
 
 # Vartotojo gidas / informacija
 
-Kolkas nėra, bet bus paruošta "vikyje": https://github.com/tadas-s/lt-eid/wiki
+https://github.com/tadas-s/lt-eid/wiki
