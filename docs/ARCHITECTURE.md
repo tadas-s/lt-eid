@@ -61,7 +61,8 @@ Tokens advertise `CKF_PROTECTED_AUTHENTICATION_PATH`, so applications call
   its last try only after PACE with the CAN. The PIN from the dialog goes to
   `lteid-tool --resume` (which uses the cached CAN), with OpenSC restarted
   around it as for the CAN below, and then logs in as usual. A wrong PIN
-  there blocks it; a blocked PIN returns `CKR_PIN_LOCKED`.
+  there blocks it; a blocked PIN is told to the user in a message dialog
+  (applications tend to fail silently) and returns `CKR_PIN_LOCKED`.
 - asks only for approval (Allow / Deny) if another application already
   logged the token in.
 

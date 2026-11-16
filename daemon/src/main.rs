@@ -43,6 +43,8 @@ use dialog::{Dialogs, Purpose};
 
 /// The private OpenSC build packaged with lt-eid.
 const DEFAULT_MODULE: &str = "/opt/lt-eid/lib/opensc-pkcs11.so";
+/// Told to the user whenever a blocked PIN stops what they asked for.
+const PIN_BLOCKED: &str = "Your eID PIN is blocked after three wrong tries.";
 
 struct Daemon {
     card: Mutex<Card>,
@@ -231,7 +233,8 @@ impl Daemon {
     }
 
     /// Ask for the PIN and run `attempt` with it, until the card accepts it
-    /// or the user gives up.
+    /// or the user gives up. A blocked PIN, found so or just blocked by the
+    /// last wrong try, is told to the user: the application may say nothing.
     fn with_pin<T>(
         &self,
         client: &Client,
@@ -243,6 +246,7 @@ impl Daemon {
         loop {
             if token.flags & CKF_USER_PIN_LOCKED != 0 {
                 eprintln!("{client}: PIN of {:?} is blocked", token.label);
+                self.dialogs.message("eID PIN blocked", PIN_BLOCKED);
                 return Err(CKR_PIN_LOCKED);
             }
             let retries = match token.flags {
@@ -284,6 +288,13 @@ impl Daemon {
                     // Refresh the retry-counter flags for the next dialog.
                     token = card.token(token.slot)?;
                 }
+                // Blocked by this try, or under us since the flags were read.
+                Err(CKR_PIN_LOCKED) => {
+                    drop(card);
+                    eprintln!("{client}: PIN of {:?} is blocked", token.label);
+                    self.dialogs.message("eID PIN blocked", PIN_BLOCKED);
+                    return Err(CKR_PIN_LOCKED);
+                }
                 result => return result,
             }
         }
@@ -303,11 +314,10 @@ impl Daemon {
             self.dialogs.message("No eID card", "Insert your Lithuanian eID card, then try again.");
             return Err(CKR_TOKEN_NOT_PRESENT);
         };
-        let blocked = "Your eID PIN is blocked after three wrong tries. Only the PUK can unblock it.";
         // Then only the eID PIN would change, and they would differ.
         if qes.flags & CKF_USER_PIN_LOCKED != 0 {
             eprintln!("{client}: PIN of {:?} is blocked, not changing the PIN", qes.label);
-            self.dialogs.message("eID PIN blocked", blocked);
+            self.dialogs.message("eID PIN blocked", PIN_BLOCKED);
             return Err(CKR_PIN_LOCKED);
         }
         eprintln!("{client}: changing the PIN");
@@ -318,14 +328,8 @@ impl Daemon {
             // From the dialog's string, so valid UTF-8.
             Ok(SecretString::from(String::from_utf8_lossy(pin).into_owned()))
         });
-        let current = match current {
-            Ok(current) => current,
-            Err(CKR_PIN_LOCKED) => {
-                self.dialogs.message("eID PIN blocked", blocked);
-                return Err(CKR_PIN_LOCKED);
-            }
-            Err(rv) => return Err(rv),
-        };
+        // `with_pin` has told the user of a blocked PIN.
+        let current = current?;
 
         // What both PINs allow, within lteid-tool's own 6 to 12 digits.
         let min = auth.min_pin_len.max(qes.min_pin_len).max(6);
