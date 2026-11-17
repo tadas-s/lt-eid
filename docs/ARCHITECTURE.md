@@ -205,7 +205,7 @@ and its patches are read from the spec.
     sudo apt-get build-dep ./packaging
     packaging/make-deb.sh          # packages in target/deb
 
-The package is versioned after the release (`0.1.0-15~ubuntu24.04`). It has
+The package is versioned after the release (`0.1.1~ubuntu24.04`). It has
 no preset: its install script enables the same units for every user.
 
 ### Without a card

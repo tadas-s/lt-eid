@@ -1,6 +1,6 @@
 # Build the lt-eid packages: an RPM on each Fedora release and a .deb on each
 # Ubuntu release listed below. Every run uploads each package as a workflow
-# artifact; a pushed v* tag (e.g. v0.1.0-5) also attaches them to a release.
+# artifact; a pushed v* tag (e.g. v0.1.1) also attaches them to a release.
 # The file names tell the releases apart (fc44, fc45, ubuntu24.04,
 # ubuntu26.04).
 name: Packages

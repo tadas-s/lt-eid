@@ -10,8 +10,8 @@
 %global __provides_exclude_from ^%{ltdir}/.*$
 
 Name:           lt-eid
-Version:        0.1.0
-Release:        16%{?dist}
+Version:        0.1.1
+Release:        1%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
 # lt-eid: LGPL-2.1-or-later. Bundled OpenSC: LGPL-2.1-or-later AND BSD-3-Clause.
@@ -172,6 +172,10 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/icons/hicolor/scalable/apps/lt-eid.svg
 
 %changelog
+* Tue Nov 17 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.1-1
+- Versioned by Version alone (tags v0.1.1, ...); Release stays at 1
+- Tells the user when the PIN is blocked
+
 * Thu Nov 12 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-16
 - Installing reloads the user managers already running: one that outlived a
   logout didn't see the units enabled, and the next login didn't start lt-eidd

@@ -15,11 +15,10 @@ rust=$(ls -d /usr/lib/rust-*/bin 2>/dev/null | sort -V | tail -n1)
 
 spec=packaging/lt-eid.spec
 version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n1)
-release=$(sed -n 's/^Release: *\([0-9]*\).*/\1/p' $spec)
 opensc_commit=$(sed -n 's/^%global opensc_commit //p' $spec)
 # One package per release, and the newer release's is the newer package.
 . /etc/os-release
-debversion=$version-$release~$ID$VERSION_ID
+debversion=$version~$ID$VERSION_ID
 
 out=$PWD/target/deb
 tree=$out/build/lt-eid-$version
