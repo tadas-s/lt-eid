@@ -14,6 +14,7 @@ use std::io::Read;
 use std::net::TcpListener;
 use std::os::fd::FromRawFd;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -185,7 +186,8 @@ fn query_param<'a>(url: &'a str, name: &str) -> Option<&'a str> {
     })
 }
 
-fn handle(p11: &Pkcs11, request: &mut Request) -> Response<std::io::Cursor<Vec<u8>>> {
+/// Answers a request. `error` gets the code of an error answer, for the log.
+fn handle(p11: &Pkcs11, request: &mut Request, error: &mut Option<&'static str>) -> Response<std::io::Cursor<Vec<u8>>> {
     let origin = request_header(request, "Origin").map(str::to_owned);
     // Browsers send an Origin with every cross-site request: refuse other
     // sites outright rather than only hiding the answer from them.
@@ -199,8 +201,11 @@ fn handle(p11: &Pkcs11, request: &mut Request) -> Response<std::io::Cursor<Vec<u
 
     let url = request.url().to_owned();
     let path = url.split('?').next().unwrap_or_default();
-    let json = |result: Result<Value, Failure>| {
-        let value = result.unwrap_or_else(|f| json!({ "exception": f.message, "errorCode": f.code }));
+    let mut json = |result: Result<Value, Failure>| {
+        let value = result.unwrap_or_else(|f| {
+            *error = Some(f.code);
+            json!({ "exception": f.message, "errorCode": f.code })
+        });
         Response::from_string(value.to_string()).with_header(header("Content-Type", "application/json"))
     };
     let text = |s: &str| Response::from_string(s).with_header(header("Content-Type", "text/html; charset=utf-8"));
@@ -238,6 +243,18 @@ fn handle(p11: &Pkcs11, request: &mut Request) -> Response<std::io::Cursor<Vec<u
         _ => Response::from_string("Not found").with_status_code(404),
     };
     cors(response)
+}
+
+/// What the log says about a request: method and path, and the page that
+/// made it. Not the query or the body: they carry the user's certificate,
+/// which has their name and personal code, and the data they sign.
+fn describe(request: &Request) -> (String, Option<String>) {
+    let path = request.url().split('?').next().unwrap_or_default();
+    // escape_debug: whoever sends the request picks these, so no control
+    // characters into the journal.
+    let line = format!("{} {}", request.method(), path.escape_debug());
+    let origin = request_header(request, "Origin").map(|o| o.escape_debug().to_string());
+    (line, origin)
 }
 
 /// The listening socket systemd passed us (socket activation), if any.
@@ -294,9 +311,23 @@ fn main() {
     // One request at a time: a login waits for the user's answer in
     // lt-eidd's dialog, and later requests wait for it.
     for mut request in server.incoming_requests() {
-        let response = handle(&p11, &mut request);
-        if let Err(e) = request.respond(response) {
-            eprintln!("responding: {e}");
+        let started = Instant::now();
+        let (line, origin) = describe(&request);
+        let mut error = None;
+        let response = handle(&p11, &mut request, &mut error);
+        let status = response.status_code().0;
+        let responded = request.respond(response);
+        // One line per request: GET /Signing/GetVersion 200 3ms origin=...
+        let mut log = format!("{line} {status} {}ms", started.elapsed().as_millis());
+        if let Some(origin) = origin {
+            log += &format!(" origin={origin}");
         }
+        if let Some(code) = error {
+            log += &format!(" error={code}");
+        }
+        if let Err(e) = responded {
+            log += &format!(" responding: {e}");
+        }
+        eprintln!("{log}");
     }
 }
