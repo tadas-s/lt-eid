@@ -20,3 +20,12 @@ aplinkai padaryta atmestinai, veikia prastai
 # Vartotojo gidas / informacija
 
 https://github.com/tadas-s/lt-eid/wiki
+
+# Atsakomybės apribojimas
+
+Tai savanoriškas, laisvalaikiu kuriamas projektas. Programinė įranga
+teikiama "tokia, kokia yra", be jokių garantijų: nei dėl jos veikimo, nei
+dėl tinkamumo kokiam nors tikslui, nei dėl saugumo. Ja naudojatės savo pačių
+rizika. Projektas nėra susijęs su jokiomis valstybės institucijomis (pvz.,
+VRM ar Asmens dokumentų išrašymo centru) ar epaslaugos.lt kūrėjais ir nėra
+jų patvirtintas ar remiamas. Išsamiau – [LGPL-2.1 licencijoje](LICENSE).
