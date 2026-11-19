@@ -36,10 +36,7 @@ const ALLOWED_ORIGIN: &str = "https://api.elpako.lt";
 /// Requests are small: a certificate and the data to sign.
 const MAX_BODY: usize = 1 << 20;
 
-/// Self-signed certificate for 127.0.0.1, the same as the Python server's,
-/// so that browsers that already accept it keep doing so.
-const TLS_CERT: &[u8] = include_bytes!("../ssl/cert.pem");
-const TLS_KEY: &[u8] = include_bytes!("../ssl/key.pem");
+mod tls;
 
 /// An error answer: Elpako's clients show `exception` to the user.
 struct Failure {
@@ -267,7 +264,18 @@ fn main() {
             std::process::exit(1);
         });
 
-    let tls = SslConfig { certificate: TLS_CERT.to_vec(), private_key: TLS_KEY.to_vec() };
+    let Some(state_dir) = tls::state_dir() else {
+        eprintln!("no directory for the certificate: neither STATE_DIRECTORY nor HOME is set");
+        std::process::exit(1);
+    };
+    let identity = tls::load_or_create(&state_dir).unwrap_or_else(|e| {
+        eprintln!("certificate: {e}");
+        std::process::exit(1);
+    });
+    let made = if identity.created { "made a new certificate" } else { "certificate" };
+    // To compare with the one the browser shows before it is accepted.
+    eprintln!("{made} {}, SHA-256 {}", identity.cert_path.display(), identity.fingerprint);
+    let tls = SslConfig { certificate: identity.certificate, private_key: identity.private_key };
     let server = match activated_listener() {
         Some(listener) => {
             eprintln!("using {}, listening on the socket from systemd", module.display());

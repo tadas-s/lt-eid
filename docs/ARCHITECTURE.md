@@ -23,6 +23,10 @@ connection to the card, so PACE runs once and clients never fight over it.
   - `main.rs` serves clients and decides who may use which token.
 - `signing-server/`: `lt-eid-signing-server`, an Elpako Signer stand-in for
   logging in to epaslaugos.lt. A client of the module like any other.
+  Its HTTPS certificate for 127.0.0.1 is made on the first start, one per
+  user, in `~/.local/state/lt-eid/` (`tls.rs`); the user accepts it once at
+  https://127.0.0.1:38888. It is not a CA and is never added to any trust
+  store.
 - `cli/`: `lt-eid`, which asks the daemon to manage the card's PINs.
 
 ## Status

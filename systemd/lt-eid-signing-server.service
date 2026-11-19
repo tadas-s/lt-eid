@@ -9,6 +9,8 @@ ConditionEnvironment=XDG_SESSION_CLASS=user
 
 [Service]
 ExecStart=/opt/lt-eid/bin/lt-eid-signing-server
+StateDirectory=lt-eid
+StateDirectoryMode=0700
 Restart=on-failure
 
 [Install]
