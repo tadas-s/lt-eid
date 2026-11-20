@@ -1,3 +1,6 @@
 # Lithuanian eID through lt-eidd. The module talks to the daemon only; it
 # never opens the card itself.
 module: /opt/lt-eid/lib/lt-eid-pkcs11.so
+# Not in GNOME's smartcard service: Lithuanian eID can't log in to a desktop
+# session, and the service would only keep polling it.
+disable-in: gsd-smartcard
