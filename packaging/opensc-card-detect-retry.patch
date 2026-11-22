@@ -1,0 +1,42 @@
+From 2791ba61c9ec836ab8d5cb97776b1736e95d0d5c Mon Sep 17 00:00:00 2001
+From: Tadas Sasnauskas <tadas@yoyo.lt>
+Date: Fri, 6 Nov 2026 10:29:01 +0200
+Subject: [PATCH] pkcs11: count card change retries per card_detect() call
+
+The retry counter guarding card_detect() against an endless
+card-changed loop (f9d93446b) is static and only reset when it runs
+out, so successful detections used it up as well: every fourth card
+change in a process returned CKR_TOKEN_NOT_PRESENT. The card was
+dropped without connecting, and as the reader event was consumed, the
+next C_GetSlotList saw "no change" and also listed no token, until the
+card was reinserted. Keep the counter local to the call.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ src/pkcs11/slot.c | 3 +--
+ 1 file changed, 1 insertion(+), 2 deletions(-)
+
+diff --git a/src/pkcs11/slot.c b/src/pkcs11/slot.c
+index 5607a04c6..fd87c0bb5 100644
+--- a/src/pkcs11/slot.c
++++ b/src/pkcs11/slot.c
+@@ -219,7 +219,7 @@ card_detect(sc_reader_t *reader, void **reader_states)
+ 	CK_RV rv;
+ 	unsigned int i;
+ 	int j;
+-	static int retry = 3;
++	int retry = 3;
+ 
+ 	sc_log(context, "%s: Detecting smart card", reader->name);
+ 	/* Check if someone inserted a card */
+@@ -264,7 +264,6 @@ again:
+ 		 * So better be fussy.*/
+ 		card_removed(reader);
+ 		if (!retry--) {
+-			retry = 3;
+ 			return CKR_TOKEN_NOT_PRESENT;
+ 		}
+ 		goto again;
+-- 
+2.56.0
+

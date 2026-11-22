@@ -29,6 +29,8 @@ Patch1:         opensc-pcsc-card-replaced.patch
 Patch2:         opensc-lteid-tool-new-pin.patch
 # The lteid driver never deletes the cached CAN.
 Patch3:         opensc-lteid-keep-cached-can.patch
+# Every fourth card change no longer drops the card (and asks for its CAN).
+Patch4:         opensc-card-detect-retry.patch
 
 ExclusiveArch:  %{rust_arches}
 
@@ -70,6 +72,7 @@ mv opensc-0.27.1 opensc
 %patch -P1 -p1 -d opensc
 %patch -P2 -p1 -d opensc
 %patch -P3 -p1 -d opensc
+%patch -P4 -p1 -d opensc
 mkdir -p .cargo
 cat > .cargo/config.toml <<'EOF'
 [source.crates-io]
@@ -175,6 +178,8 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 * Tue Nov 17 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.1-1
 - Versioned by Version alone (tags v0.1.1, ...); Release stays at 1
 - Tells the user when the PIN is blocked
+- Bundled OpenSC: every fourth card insertion no longer asks for the CAN
+  (the card was dropped and opened again)
 
 * Thu Nov 12 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.0-16
 - Installing reloads the user managers already running: one that outlived a
