@@ -10,7 +10,7 @@
 %global __provides_exclude_from ^%{ltdir}/.*$
 
 Name:           lt-eid
-Version:        0.1.1
+Version:        0.1.2
 Release:        1%{?dist}
 Summary:        Lithuanian eID card access through one central daemon
 
@@ -175,6 +175,14 @@ cat vendor/*/Cargo.toml | sed -n 's/^license = //p' | sort | uniq -c > cargo-lic
 %{_datadir}/icons/hicolor/scalable/apps/lt-eid.svg
 
 %changelog
+* Mon Nov 23 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.2-1
+- Signing server: makes its own HTTPS certificate for each user on the first
+  start instead of the built-in one, whose key was public; accept it once at
+  https://127.0.0.1:38888
+- Signing server: logs every request (no queries or bodies)
+- The PKCS#11 module is hidden from gsd-smartcard: the card needs its CAN, so
+  it can't be used for desktop login
+
 * Tue Nov 17 2026 Tadas Sasnauskas <tadas@yoyo.lt> - 0.1.1-1
 - Versioned by Version alone (tags v0.1.1, ...); Release stays at 1
 - Tells the user when the PIN is blocked

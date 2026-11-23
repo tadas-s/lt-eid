@@ -278,7 +278,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lt-eid-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cryptoki-sys",
  "lt-eid-proto",
@@ -286,7 +286,7 @@ dependencies = [
 
 [[package]]
 name = "lt-eid-daemon"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cryptoki-sys",
  "libc",
@@ -298,7 +298,7 @@ dependencies = [
 
 [[package]]
 name = "lt-eid-pkcs11"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "cryptoki-sys",
  "lt-eid-proto",
@@ -307,7 +307,7 @@ dependencies = [
 
 [[package]]
 name = "lt-eid-proto"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "postcard",
  "serde",
@@ -315,7 +315,7 @@ dependencies = [
 
 [[package]]
 name = "lt-eid-signing-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "base64",
  "cryptoki",
