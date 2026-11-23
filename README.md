@@ -11,6 +11,13 @@ paketas kuris:
 - Valdo priėjimą prie kortelės informacijos ir leidžia kortele naudotis
 kelioms programoms vienu metu
 
+Su šiuo paketu, USB lustinių kortelių skaitytuvu ir ATK galima:
+
+- Prisijungti prie valstybinių institucijų interneto svetainių per https://ipasas.lt/
+- Prisijungti prie valstybinių institucijų interneto svetainių per https://epaslaugos.lt/
+- Pasirašyti PDF dokumentus su [Autogram](https://docs.autogram.slovensko.digital/en/)
+  ([instrukcijos](https://github.com/tadas-s/lt-eid/wiki/PDF-para%C5%A1ai-su-Autogram))
+
 # Kodėl?
 
 - Oficiali VRM pateikiama programa [mCard Toolbox veikia prastai, atnaujinama retai](https://tadas-s.github.io/doc/lithuanian_electronic_identity_card/)
