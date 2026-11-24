@@ -28,6 +28,11 @@ aplinkai padaryta atmestinai, veikia prastai
 
 https://github.com/tadas-s/lt-eid/wiki
 
+# Klausimai / pagalba
+
+Pradėkite temą [diskusijų skiltyje](https://github.com/tadas-s/lt-eid/discussions), arba, 
+jei neturite/nenorite GitHub paskyros - rašykite [tadas@yoyo.lt](mailto:tadas@yoyo.lt).
+
 # Atsakomybės apribojimas
 
 Tai savanoriškas, laisvalaikiu kuriamas projektas. Programinė įranga
