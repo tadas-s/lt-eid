@@ -15,7 +15,7 @@ Su šiuo paketu, USB lustinių kortelių skaitytuvu ir ATK galima:
 
 - Prisijungti prie valstybinių institucijų interneto svetainių per https://ipasas.lt/
 - Prisijungti prie valstybinių institucijų interneto svetainių per https://epaslaugos.lt/
-- Pasirašyti PDF dokumentus su [Autogram](https://docs.autogram.slovensko.digital/en/)
+- Pasirašyti PDF dokumentus kvalifikuotu elektroniniu parašu su [Autogram](https://docs.autogram.slovensko.digital/en/)
   ([instrukcijos](https://github.com/tadas-s/lt-eid/wiki/PDF-para%C5%A1ai-su-Autogram))
 
 # Kodėl?
